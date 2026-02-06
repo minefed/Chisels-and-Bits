@@ -1,9 +1,5 @@
 import org.apache.tools.ant.filters.ReplaceTokens
 
-plugins {
-    id "net.neoforged.gradle.common"
-}
-
 apply from: 'https://raw.githubusercontent.com/ldtteam/OperaPublicaCreator/main/gradle/modules/git.gradle'
 apply from: 'https://raw.githubusercontent.com/ldtteam/OperaPublicaCreator/main/gradle/modules/util.gradle'
 
@@ -38,16 +34,9 @@ subprojects { Project subProject ->
             exclude group: 'net.minecraft', module: 'joined'
         }
 
-        if (subProject.getPlugins().hasPlugin("net.neoforged.gradle.userdev")) {
-            subProject.jarJar.enable()
-
-            subProject.dependencies.jarJar (coreProject) {
-                jarJar.ranged(it, "[${coreProject.version}]")
-                jarJar.pin(it, coreProject.version)
-                exclude group: 'net.minecraft', module: 'joined'
-            }
-        }
-        else if (subProject.getPlugins().hasPlugin("fabric-loom") && subProject.ext.remapTaskClass != null) {
+        if (subProject.getPlugins().hasPlugin("fabric-loom")
+                && subProject.ext.has("remapTaskClass")
+                && subProject.ext.remapTaskClass != null) {
             Provider<File> fmjFile = subProject.layout.buildDirectory.dir("fabric-meta-generation").map {it.dir(coreProject.name) }
                     .map { it.file("fabric.mod.json") }
                     .map { RegularFile file -> {
@@ -133,7 +122,6 @@ subprojects { Project subProject ->
                 "author"                    : rootProject.author.toString(),
                 "sources"                   : rootProject.githubUrl.toString(),
                 "package"                   : "${rootProject.group}.${subProject.name.toLowerCase()}".toString(),
-                "forgeVersion"              : project.forgeVersion,
                 "minecraftVersion"          : project.minecraftVersion,
                 "supportedScenaVersionRange": buildSupportedVersionRange(project.scenaVersion),
                 "scenaVersion"              : project.scenaVersion,
@@ -152,7 +140,7 @@ subprojects { Project subProject ->
                 return "${rootProject.name.toLowerCase()}.mixins.json"
             }
         })
-        copyTask.filesMatching(["META-INF/mods.toml", "pack.mcmeta", "mixins.json", "${rootProject.name.toLowerCase()}.mixins.json".toString(), "fabric.mod.json"]) {
+        copyTask.filesMatching(["pack.mcmeta", "mixins.json", "${rootProject.name.toLowerCase()}.mixins.json".toString(), "fabric.mod.json"]) {
             filter(ReplaceTokens, tokens: getIdentifiers())
         }
         copyTask.getInputs().properties(getIdentifiers())
@@ -168,8 +156,7 @@ subprojects { Project subProject ->
                 "Implementation-Version"  : rootProject.version,
                 "Implementation-Vendor"   : rootProject.creator,
                 "Implementation-Timestamp": new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
-                "Automatic-Module-Name"   : rootProject.name.toLowerCase().replace("-", "_") + "_" + subProject.name.toLowerCase().replace("-", "_"),
-                "FMLModType": "GAMELIBRARY"
+                "Automatic-Module-Name"   : rootProject.name.toLowerCase().replace("-", "_") + "_" + subProject.name.toLowerCase().replace("-", "_")
         ])
         jarTask.duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     }

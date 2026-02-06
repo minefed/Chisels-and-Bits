@@ -18,11 +18,3 @@ subsystems {
 }
 
 project.sourceSets.main.resources.srcDir "src/datagen/generated"
-
-sourceSets {
-    configureEach {
-        runs {
-            modIdentifier "chiselsandbits"
-        }
-    }
-}

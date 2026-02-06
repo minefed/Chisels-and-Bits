@@ -23,5 +23,5 @@ If a mod maker wants to control the selection procedure for his or her blocks, h
 - `chiselsandbits:chiselable/blocked` to prevent a block that is normally chiselable to be chiseled.
 
 ### Cross Platform Compatibility:
-This mod uses [Scena](https://github.com/Communi-Suggestu/Scena) to run common code on both forge and fabric.
-This means that the mod is compatible with both forge and fabric, and that the code is shared between both platforms via the core subproject.
+This project now targets Fabric only.
+Common code is still shared through the `core` subproject and loaded by the Fabric module.
