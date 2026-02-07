@@ -313,8 +313,15 @@ public class ChiseledBlock extends Block implements IMultiStateBlock, SimpleWate
     public boolean canBeReplaced(@NotNull final BlockState state, final BlockPlaceContext useContext)
     {
         return getBlockEntity(useContext.getLevel(), useContext.getClickedPos())
-                 .map(multiStateBlockEntity -> multiStateBlockEntity.getStatistics().isEmptyBlock())
-                 .orElse(true);
+                 .map(multiStateBlockEntity -> {
+                     if (!multiStateBlockEntity.getStatistics().isEmptyBlock()) {
+                         return false;
+                     }
+
+                     // Protect against transient statistic/storage desync right after copy/paste or clone.
+                     return multiStateBlockEntity.stream().allMatch(stateEntry -> stateEntry.getBlockInformation().isAir());
+                 })
+                 .orElse(false);
     }
 
     @Override

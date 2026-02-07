@@ -94,6 +94,8 @@ public class ChiseledBlockEntity extends BlockEntity implements
     private IBlockModelData modelData = IModelDataBuilder.create().build();
     private CompoundTag lastTag = null;
     private CompletableFuture<Void> storageFuture = null;
+    private CompletableFuture<Void> deserializationFuture = null;
+    private long storageFutureSequence = 0;
     private final List<CompoundTag> deserializationQueue = Collections.synchronizedList(Lists.newArrayList());
     private final SingleBlockVoxelShapeCache voxelShapeCache = new SingleBlockVoxelShapeCache(this);
 
@@ -153,6 +155,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
             return;
 
         this.deserializationQueue.forEach(this::deserializeNBT);
+        this.deserializationQueue.clear();
     }
 
     @Override
@@ -265,14 +268,147 @@ public class ChiseledBlockEntity extends BlockEntity implements
 
     @Override
     public void load(@NotNull final CompoundTag nbt) {
-        if (this.getLevel() != null)
-            this.deserializeNBT(nbt);
-
-        this.queueDeserializeNbt(nbt);
+        final CompoundTag normalizedTag = normalizeStorageRootTag(nbt);
+        if (this.getLevel() != null) {
+            this.deserializeNBT(normalizedTag);
+        } else {
+            this.queueDeserializeNbt(normalizedTag);
+        }
     }
 
     private void queueDeserializeNbt(CompoundTag nbt) {
         this.deserializationQueue.add(nbt);
+    }
+
+    private static CompoundTag normalizeStorageRootTag(final CompoundTag incomingTag) {
+        final CompoundTag normalizedRootTag = new CompoundTag();
+        final int version = incomingTag.contains(NbtConstants.VERSION, Tag.TAG_INT) ?
+                incomingTag.getInt(NbtConstants.VERSION) :
+                0;
+
+        normalizedRootTag.putInt(NbtConstants.VERSION, version);
+        if (incomingTag.contains(NbtConstants.DATA, Tag.TAG_COMPOUND)) {
+            normalizedRootTag.put(NbtConstants.DATA, normalizeStoragePayloadTag(incomingTag.getCompound(NbtConstants.DATA)));
+        } else {
+            normalizedRootTag.put(NbtConstants.DATA, extractStoragePayloadTag(incomingTag));
+        }
+
+        return normalizedRootTag;
+    }
+
+    private static CompoundTag extractStoragePayloadTag(final CompoundTag incomingTag) {
+        if (incomingTag.contains(NbtConstants.DATA, Tag.TAG_COMPOUND)) {
+            return normalizeStoragePayloadTag(incomingTag.getCompound(NbtConstants.DATA));
+        }
+
+        if (incomingTag.contains(NbtConstants.CHISEL_BLOCK_ENTITY_DATA, Tag.TAG_COMPOUND)) {
+            return extractStoragePayloadTag(incomingTag.getCompound(NbtConstants.CHISEL_BLOCK_ENTITY_DATA));
+        }
+
+        if (incomingTag.contains(NbtConstants.COMPRESSED_STORAGE, Tag.TAG_COMPOUND)) {
+            return normalizeStoragePayloadTag(incomingTag.getCompound(NbtConstants.COMPRESSED_STORAGE));
+        }
+
+        if (looksLikeStoragePayloadTag(incomingTag)) {
+            return normalizeStoragePayloadTag(incomingTag);
+        }
+
+        // Some external tools flatten the payload into the root and keep only `data`.
+        if (incomingTag.contains(NbtConstants.DATA)) {
+            final CompoundTag flattenedPayload = incomingTag.copy();
+            flattenedPayload.remove(NbtConstants.VERSION);
+            return normalizeStoragePayloadTag(flattenedPayload);
+        }
+
+        return new CompoundTag();
+    }
+
+    private static boolean looksLikeStoragePayloadTag(final CompoundTag candidateTag) {
+        if (candidateTag.contains(NbtConstants.COMPRESSED) ||
+                candidateTag.contains(NbtConstants.DATA_IS_COMPRESSED) ||
+                candidateTag.contains(NbtConstants.COMPRESSED_DATA)) {
+            return true;
+        }
+
+        if (candidateTag.contains(NbtConstants.CHISELED_DATA, Tag.TAG_COMPOUND) ||
+                candidateTag.contains(NbtConstants.STATISTICS, Tag.TAG_COMPOUND)) {
+            return true;
+        }
+
+        return candidateTag.contains(NbtConstants.PALETTE) && candidateTag.contains(NbtConstants.DATA);
+    }
+
+    private static CompoundTag normalizeStoragePayloadTag(final CompoundTag payloadTag) {
+        final CompoundTag normalizedPayloadTag = payloadTag.copy();
+
+        if (!normalizedPayloadTag.contains(NbtConstants.COMPRESSED) &&
+                normalizedPayloadTag.contains(NbtConstants.DATA_IS_COMPRESSED)) {
+            normalizedPayloadTag.putBoolean(
+                    NbtConstants.COMPRESSED,
+                    normalizedPayloadTag.getBoolean(NbtConstants.DATA_IS_COMPRESSED)
+            );
+        }
+
+        if (!normalizedPayloadTag.contains(NbtConstants.DATA) &&
+                normalizedPayloadTag.contains(NbtConstants.COMPRESSED_DATA)) {
+            if (normalizedPayloadTag.getTagType(NbtConstants.COMPRESSED_DATA) == Tag.TAG_BYTE_ARRAY) {
+                normalizedPayloadTag.putByteArray(
+                        NbtConstants.DATA,
+                        normalizedPayloadTag.getByteArray(NbtConstants.COMPRESSED_DATA)
+                );
+            } else if (normalizedPayloadTag.getTagType(NbtConstants.COMPRESSED_DATA) == Tag.TAG_COMPOUND) {
+                normalizedPayloadTag.put(
+                        NbtConstants.DATA,
+                        normalizedPayloadTag.getCompound(NbtConstants.COMPRESSED_DATA)
+                );
+            }
+        }
+
+        if (!normalizedPayloadTag.contains(NbtConstants.COMPRESSED) &&
+                normalizedPayloadTag.getTagType(NbtConstants.DATA) == Tag.TAG_BYTE_ARRAY &&
+                !normalizedPayloadTag.contains(NbtConstants.CHISELED_DATA, Tag.TAG_COMPOUND) &&
+                !normalizedPayloadTag.contains(NbtConstants.PALETTE)) {
+            normalizedPayloadTag.putBoolean(NbtConstants.COMPRESSED, true);
+        }
+
+        if (!normalizedPayloadTag.contains(NbtConstants.CHISELED_DATA, Tag.TAG_COMPOUND) &&
+                normalizedPayloadTag.contains(NbtConstants.PALETTE) &&
+                normalizedPayloadTag.contains(NbtConstants.DATA)) {
+            final CompoundTag storageTag = new CompoundTag();
+            storageTag.put(NbtConstants.PALETTE, Objects.requireNonNull(normalizedPayloadTag.get(NbtConstants.PALETTE)).copy());
+            storageTag.put(NbtConstants.DATA, Objects.requireNonNull(normalizedPayloadTag.get(NbtConstants.DATA)).copy());
+            normalizedPayloadTag.put(NbtConstants.CHISELED_DATA, storageTag);
+        }
+
+        if (normalizedPayloadTag.contains(NbtConstants.CHISELED_DATA, Tag.TAG_COMPOUND) &&
+                !normalizedPayloadTag.contains(NbtConstants.STATISTICS, Tag.TAG_COMPOUND)) {
+            // Missing statistics should trigger runtime recalculation from chiseledData.
+            normalizedPayloadTag.put(NbtConstants.STATISTICS, new CompoundTag());
+        }
+
+        return normalizedPayloadTag;
+    }
+
+    private static void enrichWithCompatibilityStorageKeys(final CompoundTag tag) {
+        if (!tag.contains(NbtConstants.DATA, Tag.TAG_COMPOUND)) {
+            return;
+        }
+
+        final CompoundTag payloadTag = tag.getCompound(NbtConstants.DATA).copy();
+        tag.put(NbtConstants.CHISEL_BLOCK_ENTITY_DATA, payloadTag.copy());
+        tag.put(NbtConstants.COMPRESSED_STORAGE, payloadTag.copy());
+
+        if (payloadTag.contains(NbtConstants.COMPRESSED)) {
+            tag.putBoolean(NbtConstants.DATA_IS_COMPRESSED, payloadTag.getBoolean(NbtConstants.COMPRESSED));
+        }
+
+        if (payloadTag.contains(NbtConstants.DATA)) {
+            if (payloadTag.getTagType(NbtConstants.DATA) == Tag.TAG_BYTE_ARRAY) {
+                tag.putByteArray(NbtConstants.COMPRESSED_DATA, payloadTag.getByteArray(NbtConstants.DATA));
+            } else if (payloadTag.getTagType(NbtConstants.DATA) == Tag.TAG_COMPOUND) {
+                tag.put(NbtConstants.COMPRESSED_DATA, payloadTag.getCompound(NbtConstants.DATA));
+            }
+        }
     }
 
     @Override
@@ -281,10 +417,23 @@ public class ChiseledBlockEntity extends BlockEntity implements
     }
 
     public void deserializeNBT(final CompoundTag nbt, Runnable onLoaded) {
-        this.storageEngine.deserializeOffThread(nbt)
+        final CompoundTag normalizedTag = normalizeStorageRootTag(nbt);
+        synchronized (this.tagSyncHandle) {
+            if (this.storageFuture != null) {
+                this.storageFuture.cancel(false);
+                this.storageFuture = null;
+            }
+
+            // Invalidate any previously queued async save result before deserializing incoming data.
+            advanceStorageFutureSequence();
+            this.isInitialized = false;
+            this.lastTag = normalizedTag;
+        }
+
+        final CompletableFuture<Void> currentDeserializationFuture = this.storageEngine.deserializeOffThread(normalizedTag)
                 .thenRun(onLoaded)
                 .thenRunAsync(() -> {
-                    if (mutableStatistics.isRequiresRecalculation()) {
+                    if (mutableStatistics.isRequiresRecalculation() || !mutableStatistics.isStorageConsistent(this.storage)) {
                         mutableStatistics.recalculate(this.storage, shouldUpdateWorld());
                     }
 
@@ -294,7 +443,17 @@ public class ChiseledBlockEntity extends BlockEntity implements
                         setChanged();
                     }
                 }, getExecutor());
-        this.lastTag = nbt;
+
+        synchronized (this.tagSyncHandle) {
+            this.deserializationFuture = currentDeserializationFuture;
+        }
+        currentDeserializationFuture.whenComplete((unused, throwable) -> {
+            synchronized (this.tagSyncHandle) {
+                if (this.deserializationFuture == currentDeserializationFuture) {
+                    this.deserializationFuture = null;
+                }
+            }
+        });
     }
 
     @Override
@@ -306,11 +465,23 @@ public class ChiseledBlockEntity extends BlockEntity implements
     public void saveAdditional(@NotNull final CompoundTag compound) {
         super.saveAdditional(compound);
 
+        final CompletableFuture<Void> currentDeserializationFuture;
         synchronized (this.tagSyncHandle) {
-            if (this.lastTag != null) {
+            currentDeserializationFuture = this.deserializationFuture;
+        }
+
+        if (currentDeserializationFuture != null) {
+            currentDeserializationFuture.join();
+        }
+
+        synchronized (this.tagSyncHandle) {
+            if (this.lastTag != null && !this.isInitialized) {
                 //Off-Thread completed.)
+                this.lastTag = normalizeStorageRootTag(this.lastTag);
+
                 final CompoundTag nbt = this.lastTag.copy();
                 nbt.getAllKeys().forEach(key -> compound.put(key, nbt.get(key)));
+                enrichWithCompatibilityStorageKeys(compound);
                 return;
             }
         }
@@ -322,10 +493,12 @@ public class ChiseledBlockEntity extends BlockEntity implements
             Validate.notNull(this.lastTag, "The storage future did not complete.");
             final CompoundTag nbt = this.lastTag.copy();
             nbt.getAllKeys().forEach(key -> compound.put(key, nbt.get(key)));
+            enrichWithCompatibilityStorageKeys(compound);
             return;
         }
 
         this.storageEngine.serializeNBTInto(compound);
+        enrichWithCompatibilityStorageKeys(compound);
     }
     
     @Override
@@ -354,9 +527,26 @@ public class ChiseledBlockEntity extends BlockEntity implements
         return voxelShapeCache.getShape(type);
     }
 
+    private void setOffThreadSaveResult(final long storageSequence, final CompoundTag tag) {
+        synchronized (this.tagSyncHandle) {
+            if (storageSequence != this.storageFutureSequence) {
+                return;
+            }
+
+            this.lastTag = tag;
+        }
+    }
+
     /**
-     * For tile entities, ensures the chunk containing the tile entity is saved to disk later - the game won't think it hasn't changed and skip it.
+     * Advances the asynchronous serialization sequence and returns the new sequence value.
      */
+    private long advanceStorageFutureSequence() {
+        synchronized (this.tagSyncHandle) {
+            this.storageFutureSequence += 1;
+            return this.storageFutureSequence;
+        }
+    }
+
     @Override
     public void setChanged() {
         if (!this.batchMutations.isEmpty())
@@ -364,6 +554,15 @@ public class ChiseledBlockEntity extends BlockEntity implements
 
         if (getLevel() == null)
             return;
+
+        synchronized (this.tagSyncHandle) {
+            // External copy/clone pipelines can mark the block entity dirty immediately after load().
+            // If the payload is still being deserialized, avoid recomputing and persisting the empty default state.
+            if (this.deserializationFuture != null && !this.isInitialized) {
+                super.setChanged();
+                return;
+            }
+        }
 
         super.setChanged();
 
@@ -374,6 +573,10 @@ public class ChiseledBlockEntity extends BlockEntity implements
         voxelShapeCache.reset();
 
         if (!getLevel().isClientSide()) {
+            if (this.mutableStatistics.isRequiresRecalculation() || !this.mutableStatistics.isStorageConsistent(this.storage)) {
+                this.mutableStatistics.recalculate(this.storage, true);
+            }
+
             this.mutableStatistics.updatePrimaryState(true);
 
             synchronized (this.tagSyncHandle) {
@@ -381,10 +584,11 @@ public class ChiseledBlockEntity extends BlockEntity implements
                     this.storageFuture.cancel(false);
                 }
                 this.lastTag = null;
+                final long currentStorageFutureSequence = advanceStorageFutureSequence();
 
                 this.storageFuture = this.storageEngine.serializeOffThread(
                         tag -> CompletableFuture.runAsync(
-                                () -> this.setOffThreadSaveResult(tag), this.storageEngine
+                                () -> this.setOffThreadSaveResult(currentStorageFutureSequence, tag), this.storageEngine
                         ));
 
                 ChiselsAndBits.getInstance().getNetworkChannel().sendToTrackingChunk(
@@ -392,12 +596,6 @@ public class ChiseledBlockEntity extends BlockEntity implements
                         getLevel().getChunkAt(getBlockPos())
                 );
             }
-        }
-    }
-
-    private void setOffThreadSaveResult(final CompoundTag tag) {
-        synchronized (this.tagSyncHandle) {
-            this.lastTag = tag;
         }
     }
 
@@ -1059,6 +1257,17 @@ public class ChiseledBlockEntity extends BlockEntity implements
 
             final boolean primaryIsAir = this.primaryState.isAir();
 
+            if (primaryIsAir) {
+                final Map<IBlockInformation, Integer> storageCounts = Maps.newHashMap();
+                ChiseledBlockEntity.this.storage.count(storageCounts::put);
+                storageCounts.remove(BlockInformation.AIR);
+
+                if (!storageCounts.isEmpty()) {
+                    recalculate(ChiseledBlockEntity.this.storage, updateWorld);
+                    return;
+                }
+            }
+
             if ((this.countMap.getOrDefault(primaryState, 0) == StateEntrySize.current().getBitsPerBlock() || primaryIsAir || currentPrimary != primaryState) && updateWorld) {
                 if (primaryIsAir) {
                     this.worldReaderSupplier.get().setBlock(
@@ -1487,6 +1696,36 @@ public class ChiseledBlockEntity extends BlockEntity implements
             return requiresRecalculation;
         }
 
+        public boolean isStorageConsistent(final IStateEntryStorage source) {
+            final Map<IBlockInformation, Integer> storageCounts = Maps.newHashMap();
+            source.count(storageCounts::put);
+            storageCounts.remove(BlockInformation.AIR);
+
+            final Map<IBlockInformation, Integer> statisticsCounts = Maps.newHashMap(this.countMap);
+            statisticsCounts.remove(BlockInformation.AIR);
+
+            if (!statisticsCounts.equals(storageCounts)) {
+                return false;
+            }
+
+            final int countedTotalUsedBlockCount = storageCounts.values().stream().mapToInt(Integer::intValue).sum();
+            if (this.totalUsedBlockCount != countedTotalUsedBlockCount) {
+                return false;
+            }
+
+            if (storageCounts.isEmpty()) {
+                return this.primaryState.isAir();
+            }
+
+            if (this.primaryState.isAir()) {
+                return false;
+            }
+
+            final int highestCount = storageCounts.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+            final int primaryStateCount = storageCounts.getOrDefault(this.primaryState, 0);
+            return primaryStateCount == highestCount;
+        }
+
         private void recalculate(final IStateEntryStorage source) {
             recalculate(source, true);
         }
@@ -1836,11 +2075,6 @@ public class ChiseledBlockEntity extends BlockEntity implements
         public void syncPayloadOnGameThread(Payload payload) {
             storage = payload.storage;
             mutableStatistics = payload.mutableStatistics;
-
-            if (!isInitialized) {
-                setChanged();
-            }
-
             isInitialized = true;
         }
 
