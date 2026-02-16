@@ -319,6 +319,10 @@ public class ChiseledBlock extends Block implements IMultiStateBlock, SimpleWate
                      }
 
                      // Protect against transient statistic/storage desync right after copy/paste or clone.
+                     if (multiStateBlockEntity instanceof ChiseledBlockEntity chiseledBlockEntity) {
+                         return chiseledBlockEntity.isStorageEmpty();
+                     }
+
                      return multiStateBlockEntity.stream().allMatch(stateEntry -> stateEntry.getBlockInformation().isAir());
                  })
                  .orElse(false);

@@ -433,7 +433,8 @@ public class ChiseledBlockEntity extends BlockEntity implements
         final CompletableFuture<Void> currentDeserializationFuture = this.storageEngine.deserializeOffThread(normalizedTag)
                 .thenRun(onLoaded)
                 .thenRunAsync(() -> {
-                    if (mutableStatistics.isRequiresRecalculation() || !mutableStatistics.isStorageConsistent(this.storage)) {
+                    if (mutableStatistics.isRequiresRecalculation() ||
+                            (mutableStatistics.getPrimaryState().isAir() && !this.isStorageEmpty())) {
                         mutableStatistics.recalculate(this.storage, shouldUpdateWorld());
                     }
 
@@ -465,25 +466,21 @@ public class ChiseledBlockEntity extends BlockEntity implements
     public void saveAdditional(@NotNull final CompoundTag compound) {
         super.saveAdditional(compound);
 
-        final CompletableFuture<Void> currentDeserializationFuture;
+        final CompoundTag deserializationSnapshotTag;
+        final boolean isDeserializing;
+        final boolean initialized;
         synchronized (this.tagSyncHandle) {
-            currentDeserializationFuture = this.deserializationFuture;
+            isDeserializing = this.deserializationFuture != null && !this.deserializationFuture.isDone();
+            initialized = this.isInitialized;
+            deserializationSnapshotTag = this.lastTag == null ? null : this.lastTag.copy();
         }
 
-        if (currentDeserializationFuture != null) {
-            currentDeserializationFuture.join();
-        }
-
-        synchronized (this.tagSyncHandle) {
-            if (this.lastTag != null && !this.isInitialized) {
-                //Off-Thread completed.)
-                this.lastTag = normalizeStorageRootTag(this.lastTag);
-
-                final CompoundTag nbt = this.lastTag.copy();
-                nbt.getAllKeys().forEach(key -> compound.put(key, nbt.get(key)));
-                enrichWithCompatibilityStorageKeys(compound);
-                return;
-            }
+        if (deserializationSnapshotTag != null && (isDeserializing || !initialized)) {
+            // Avoid blocking the game thread while async payload deserialization is still pending.
+            final CompoundTag nbt = normalizeStorageRootTag(deserializationSnapshotTag);
+            nbt.getAllKeys().forEach(key -> compound.put(key, nbt.get(key)));
+            enrichWithCompatibilityStorageKeys(compound);
+            return;
         }
 
         if (this.storageFuture != null) {
@@ -527,6 +524,21 @@ public class ChiseledBlockEntity extends BlockEntity implements
         return voxelShapeCache.getShape(type);
     }
 
+    public boolean isStorageEmpty() {
+        final int bitsPerSide = StateEntrySize.current().getBitsPerBlockSide();
+        for (int x = 0; x < bitsPerSide; x++) {
+            for (int y = 0; y < bitsPerSide; y++) {
+                for (int z = 0; z < bitsPerSide; z++) {
+                    if (!this.storage.getBlockInformation(x, y, z).isAir()) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
     private void setOffThreadSaveResult(final long storageSequence, final CompoundTag tag) {
         synchronized (this.tagSyncHandle) {
             if (storageSequence != this.storageFutureSequence) {
@@ -555,6 +567,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
         if (getLevel() == null)
             return;
 
+        final boolean shouldValidateDeserializedState;
         synchronized (this.tagSyncHandle) {
             // External copy/clone pipelines can mark the block entity dirty immediately after load().
             // If the payload is still being deserialized, avoid recomputing and persisting the empty default state.
@@ -562,6 +575,8 @@ public class ChiseledBlockEntity extends BlockEntity implements
                 super.setChanged();
                 return;
             }
+
+            shouldValidateDeserializedState = this.deserializationFuture != null && !this.deserializationFuture.isDone();
         }
 
         super.setChanged();
@@ -573,7 +588,8 @@ public class ChiseledBlockEntity extends BlockEntity implements
         voxelShapeCache.reset();
 
         if (!getLevel().isClientSide()) {
-            if (this.mutableStatistics.isRequiresRecalculation() || !this.mutableStatistics.isStorageConsistent(this.storage)) {
+            if (this.mutableStatistics.isRequiresRecalculation() ||
+                    (shouldValidateDeserializedState && this.mutableStatistics.getPrimaryState().isAir() && !this.isStorageEmpty())) {
                 this.mutableStatistics.recalculate(this.storage, true);
             }
 
@@ -1258,11 +1274,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
             final boolean primaryIsAir = this.primaryState.isAir();
 
             if (primaryIsAir) {
-                final Map<IBlockInformation, Integer> storageCounts = Maps.newHashMap();
-                ChiseledBlockEntity.this.storage.count(storageCounts::put);
-                storageCounts.remove(BlockInformation.AIR);
-
-                if (!storageCounts.isEmpty()) {
+                if (!ChiseledBlockEntity.this.isStorageEmpty()) {
                     recalculate(ChiseledBlockEntity.this.storage, updateWorld);
                     return;
                 }
