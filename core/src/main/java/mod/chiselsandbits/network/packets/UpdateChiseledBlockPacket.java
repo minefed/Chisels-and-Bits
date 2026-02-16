@@ -8,8 +8,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.FriendlyByteBuf;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.function.Consumer;
-
 import static com.communi.suggestu.scena.core.dist.Dist.CLIENT;
 
 public final class UpdateChiseledBlockPacket extends ModPacket
@@ -17,7 +15,6 @@ public final class UpdateChiseledBlockPacket extends ModPacket
 
     private BlockPos blockPos;
     private byte[] data;
-    private Consumer<byte[]> dataConsumer;
 
     public UpdateChiseledBlockPacket(final INetworkUpdatableEntity tileEntity)
     {
@@ -27,10 +24,12 @@ public final class UpdateChiseledBlockPacket extends ModPacket
 
     private static byte @NotNull [] writeBlockEntity(INetworkUpdatableEntity tileEntity) {
         final FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
-        tileEntity.serializeInto(buf);
-        byte[] data = buf.array();
-        buf.release();
-        return data;
+        try {
+            tileEntity.serializeInto(buf);
+            return PacketBufferUtils.copyWrittenBytes(buf);
+        } finally {
+            buf.release();
+        }
     }
 
     public UpdateChiseledBlockPacket(final FriendlyByteBuf buffer)

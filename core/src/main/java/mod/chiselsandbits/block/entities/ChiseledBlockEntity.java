@@ -45,6 +45,7 @@ import mod.chiselsandbits.storage.IStorageHandler;
 import mod.chiselsandbits.storage.StorageEngineBuilder;
 import mod.chiselsandbits.utils.BlockPosUtils;
 import mod.chiselsandbits.utils.LZ4DataCompressionUtils;
+import mod.chiselsandbits.utils.ModelDataUpdateCoalescer;
 import mod.chiselsandbits.utils.MultiStateSnapshotUtils;
 import mod.chiselsandbits.voxelshape.MultiStateBlockEntityDiscreteVoxelShape;
 import mod.chiselsandbits.voxelshape.SingleBlockVoxelShapeCache;
@@ -98,6 +99,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
     private long storageFutureSequence = 0;
     private final List<CompoundTag> deserializationQueue = Collections.synchronizedList(Lists.newArrayList());
     private final SingleBlockVoxelShapeCache voxelShapeCache = new SingleBlockVoxelShapeCache(this);
+    private final ModelDataUpdateCoalescer modelDataUpdateCoalescer = new ModelDataUpdateCoalescer();
 
     public ChiseledBlockEntity(BlockPos position, BlockState state) {
         super(ModBlockEntityTypes.CHISELED.get(), position, state);
@@ -134,7 +136,15 @@ public class ChiseledBlockEntity extends BlockEntity implements
     }
 
     public void updateModelData() {
-        ChiseledBlockModelDataManager.getInstance().updateModelData(this);
+        this.modelDataUpdateCoalescer.requestUpdate(this::submitModelDataUpdate);
+    }
+
+    private void submitModelDataUpdate() {
+        ChiseledBlockModelDataManager.getInstance().updateModelData(this, this::onModelDataUpdateCompleted, false);
+    }
+
+    private void onModelDataUpdateCompleted() {
+        this.modelDataUpdateCoalescer.markCompleted(this::submitModelDataUpdate);
     }
 
     private void updateModelDataIfInLoadedChunk() {
@@ -1042,10 +1052,15 @@ public class ChiseledBlockEntity extends BlockEntity implements
     }
 
     private static final class Identifier implements IArrayBackedAreaShapeIdentifier {
-        private final IStateEntryStorage snapshot;
+        private final long[] backingData;
+        private final List<IBlockInformation> palette;
+        private final int cachedHashCode;
 
         private Identifier(final IStateEntryStorage section) {
-            this.snapshot = section.createSnapshot();
+            final IStateEntryStorage snapshot = section.createSnapshot();
+            this.backingData = snapshot.getRawData();
+            this.palette = List.copyOf(snapshot.getContainedPalette());
+            this.cachedHashCode = 31 * Arrays.hashCode(this.backingData) + this.palette.hashCode();
         }
 
         @Override
@@ -1063,24 +1078,25 @@ public class ChiseledBlockEntity extends BlockEntity implements
 
         @Override
         public int hashCode() {
-            return snapshot.hashCode();
+            return cachedHashCode;
         }
 
         @Override
         public String toString() {
             return "Identifier{" +
-                    "snapshot=" + snapshot +
+                    "backingDataLength=" + this.backingData.length +
+                    ", paletteSize=" + this.palette.size() +
                     '}';
         }
 
         @Override
         public long[] getBackingData() {
-            return snapshot.getRawData();
+            return this.backingData;
         }
 
         @Override
         public List<IBlockInformation> getPalette() {
-            return snapshot.getContainedPalette();
+            return this.palette;
         }
     }
 

@@ -10,6 +10,9 @@ project.dependencies.implementation "net.minecraft:client:${project.minecraftVer
 project.dependencies.implementation "com.communi-suggestu.scena:scena-core:${project.scenaVersion}"
 project.dependencies.implementation "org.lz4:lz4-pure-java:${project.lz4Version}"
 
+project.dependencies.testImplementation "org.junit.jupiter:junit-jupiter-api:5.10.2"
+project.dependencies.testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine:5.10.2"
+
 subsystems {
     parchment {
         minecraftVersion = project.parchmentMinecraftVersion
@@ -18,3 +21,7 @@ subsystems {
 }
 
 project.sourceSets.main.resources.srcDir "src/datagen/generated"
+
+tasks.named("test", Test).configure {
+    useJUnitPlatform()
+}

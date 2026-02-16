@@ -37,8 +37,9 @@ public class ChiseledBlockModelDataManager
     {
         if (!force)
         {
-            if (!tileEntity.hasLevel() || !tileEntity.getLevel().isClientSide() || tileEntity == null)
+            if (tileEntity == null || !tileEntity.hasLevel() || !tileEntity.getLevel().isClientSide())
             {
+                onCompleteCallback.run();
                 return;
             }
         }

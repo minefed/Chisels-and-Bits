@@ -165,9 +165,17 @@ public class ChiseledBlockModelDataExecutor {
                             .build();
                 }, recalculationService)
                 .thenAcceptAsync(tileEntity::setModelData, recalculationService)
-                .thenRunAsync(onCompleteCallback, recalculationService)
-                .thenRunAsync(() -> {
-                    if (Minecraft.getInstance().level == tileEntity.getLevel()) {
+                .handleAsync((unused, throwable) -> {
+                    onCompleteCallback.run();
+                    if (throwable != null) {
+                        LOGGER.error("Failed to update model data for chiseled block entity", throwable);
+                        return false;
+                    }
+
+                    return true;
+                }, recalculationService)
+                .thenAcceptAsync(updateSucceeded -> {
+                    if (updateSucceeded && Minecraft.getInstance().level == tileEntity.getLevel()) {
                         IModelDataManager.getInstance().requestModelDataRefresh(tileEntity);
                         Objects.requireNonNull(Minecraft.getInstance().level).sendBlockUpdated(
                                 tileEntity.getBlockPos(),
@@ -176,11 +184,7 @@ public class ChiseledBlockModelDataExecutor {
                                 8
                         );
                     }
-                }, Minecraft.getInstance())
-                .exceptionally(throwable -> {
-                    LOGGER.error("Failed to update model data for chiseled block entity", throwable);
-                    return null;
-                });
+                }, Minecraft.getInstance());
     }
 
     public static void updateModelDataPerContainedState(final ChiseledBlockEntity tileEntity, final Consumer<Table<RenderType, IBlockInformation, BakedModel>> resultConsumer) {
