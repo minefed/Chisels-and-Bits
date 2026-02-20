@@ -37,6 +37,7 @@ public class ClientConfiguration implements IClientConfiguration
     private final Supplier<Long>                       stackModelCacheSize;
     private final Supplier<Long>                       faceLayerCacheSize;
     private final Supplier<Integer>                    modelBuildingThreadCount;
+    private final Supplier<ChiseledRenderingPerformanceMode> chiseledRenderingPerformanceMode;
     private final Supplier<Integer>                    clipboardSize;
     private final Supplier<Boolean>                    addBrokenBlocksToClipboard;
     private final Supplier<Boolean>                    addPickedBlocksToClipboard;
@@ -76,6 +77,7 @@ public class ClientConfiguration implements IClientConfiguration
         cullTestingCacheSize = builder.defineLong("performance.caches.sizes.cull-testing", 1000, 3500, 200000);
         modelBuildingThreadCount = builder.defineInteger("performance.model-building.thread-count", Math.max(1, Runtime.getRuntime().availableProcessors()) / 2, 1, Runtime.getRuntime()
           .availableProcessors());
+        chiseledRenderingPerformanceMode = builder.defineEnum("performance.chiseled-rendering.mode", ChiseledRenderingPerformanceMode.BALANCED);
         stackModelCacheSize = builder.defineLong("performance.caches.sizes.stack-models", 100, 0, Long.MAX_VALUE);
         showCoolDownError = builder.defineBoolean("settings.warnings.show-cool-down-error", false);
         shouldScrollInteractionsChangeMode = builder.defineBoolean("settings.interactions.scrolling-changes-mode", true);
@@ -189,6 +191,11 @@ public class ClientConfiguration implements IClientConfiguration
     public Supplier<Integer> getModelBuildingThreadCount()
     {
         return modelBuildingThreadCount;
+    }
+
+    @Override
+    public Supplier<ChiseledRenderingPerformanceMode> getChiseledRenderingPerformanceMode() {
+        return chiseledRenderingPerformanceMode;
     }
 
     @Override

@@ -15,6 +15,51 @@ import java.util.function.Supplier;
  */
 public interface IClientConfiguration
 {
+    enum ChiseledRenderingPerformanceMode {
+        COMPAT(512, 0.75D, 0.20D),
+        BALANCED(2048, 1.00D, 0.35D),
+        AGGRESSIVE(4096, 1.50D, 0.60D);
+
+        private final int modelUpdateQueueBudget;
+        private final double modelCacheSizeMultiplier;
+        private final double incrementalRebuildThresholdRatio;
+
+        ChiseledRenderingPerformanceMode(
+                final int modelUpdateQueueBudget,
+                final double modelCacheSizeMultiplier,
+                final double incrementalRebuildThresholdRatio
+        ) {
+            this.modelUpdateQueueBudget = modelUpdateQueueBudget;
+            this.modelCacheSizeMultiplier = modelCacheSizeMultiplier;
+            this.incrementalRebuildThresholdRatio = incrementalRebuildThresholdRatio;
+        }
+
+        public int resolveModelBuildingThreadCap(final int configuredThreadCount, final int availableProcessors) {
+            final int sanitizedConfiguredThreads = Math.max(1, configuredThreadCount);
+            final int sanitizedAvailableProcessors = Math.max(1, availableProcessors);
+
+            final int modeThreadCap = switch (this) {
+                case COMPAT -> 1;
+                case BALANCED -> Math.max(1, sanitizedAvailableProcessors / 2);
+                case AGGRESSIVE -> sanitizedAvailableProcessors;
+            };
+
+            return Math.max(1, Math.min(sanitizedConfiguredThreads, modeThreadCap));
+        }
+
+        public int getModelUpdateQueueBudget() {
+            return modelUpdateQueueBudget;
+        }
+
+        public double getModelCacheSizeMultiplier() {
+            return modelCacheSizeMultiplier;
+        }
+
+        public double getIncrementalRebuildThresholdRatio() {
+            return incrementalRebuildThresholdRatio;
+        }
+    }
+
     /**
      * The client configuration.
      * Elements in this configuration are only relevant for the client side of C{@literal &}B.
@@ -157,6 +202,53 @@ public interface IClientConfiguration
      * @return A configuration supplier which indicates how many threads should be used.
      */
     Supplier<Integer> getModelBuildingThreadCount();
+
+    /**
+     * Indicates the chiseled rendering performance mode used to derive runtime budgets.
+     *
+     * @return A configuration supplier which indicates the current performance mode.
+     */
+    Supplier<ChiseledRenderingPerformanceMode> getChiseledRenderingPerformanceMode();
+
+    /**
+     * Indicates the maximum amount of queued chiseled model updates allowed by the current mode.
+     *
+     * @return The queue budget for model updates.
+     */
+    default int getModelUpdateQueueBudget() {
+        return getChiseledRenderingPerformanceMode().get().getModelUpdateQueueBudget();
+    }
+
+    /**
+     * Indicates the effective model cache size, including mode-specific scaling.
+     *
+     * @return The scaled model cache size.
+     */
+    default long getEffectiveModelCacheSize() {
+        final long configuredSize = Math.max(1L, getModelCacheSize().get());
+        final double multiplier = getChiseledRenderingPerformanceMode().get().getModelCacheSizeMultiplier();
+        return Math.max(1L, Math.round(configuredSize * multiplier));
+    }
+
+    /**
+     * Indicates the effective model-building thread count after applying mode caps.
+     *
+     * @return The effective model-building thread count.
+     */
+    default int getEffectiveModelBuildingThreadCount() {
+        final int configuredThreadCount = getModelBuildingThreadCount().get();
+        final int availableProcessors = Runtime.getRuntime().availableProcessors();
+        return getChiseledRenderingPerformanceMode().get().resolveModelBuildingThreadCap(configuredThreadCount, availableProcessors);
+    }
+
+    /**
+     * Indicates the dirty-volume fallback threshold ratio used for incremental mesh rebuilds.
+     *
+     * @return The incremental rebuild threshold ratio.
+     */
+    default double getIncrementalRebuildThresholdRatio() {
+        return getChiseledRenderingPerformanceMode().get().getIncrementalRebuildThresholdRatio();
+    }
 
     /**
      * Indicates the amount of itemstacks that can be stored in the clipboard.

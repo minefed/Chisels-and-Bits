@@ -26,6 +26,7 @@ import mod.chiselsandbits.api.multistate.StateEntrySize;
 import mod.chiselsandbits.api.multistate.accessor.IStateEntryInfo;
 import mod.chiselsandbits.api.multistate.accessor.identifier.IAreaShapeIdentifier;
 import mod.chiselsandbits.api.multistate.accessor.identifier.IArrayBackedAreaShapeIdentifier;
+import mod.chiselsandbits.api.multistate.accessor.identifier.IRevisionedAreaShapeIdentifierProvider;
 import mod.chiselsandbits.api.multistate.accessor.sortable.IPositionMutator;
 import mod.chiselsandbits.api.multistate.mutator.IMutableStateEntryInfo;
 import mod.chiselsandbits.api.util.IBatchMutation;
@@ -37,7 +38,10 @@ import mod.chiselsandbits.api.multistate.statistics.IMultiStateObjectStatistics;
 import mod.chiselsandbits.api.util.*;
 import mod.chiselsandbits.api.util.constants.NbtConstants;
 import mod.chiselsandbits.block.entities.storage.SimpleStateEntryStorage;
-import mod.chiselsandbits.client.model.data.ChiseledBlockModelDataManager;
+import mod.chiselsandbits.client.model.data.ChiseledBlockModelDataExecutor;
+import mod.chiselsandbits.client.model.meshing.DirtyRegion;
+import mod.chiselsandbits.network.packets.ModPacket;
+import mod.chiselsandbits.network.packets.UpdateChiseledBlockDeltaPacket;
 import mod.chiselsandbits.network.packets.UpdateChiseledBlockPacket;
 import mod.chiselsandbits.registrars.ModBlockEntityTypes;
 import mod.chiselsandbits.storage.IMultiThreadedStorageEngine;
@@ -45,7 +49,6 @@ import mod.chiselsandbits.storage.IStorageHandler;
 import mod.chiselsandbits.storage.StorageEngineBuilder;
 import mod.chiselsandbits.utils.BlockPosUtils;
 import mod.chiselsandbits.utils.LZ4DataCompressionUtils;
-import mod.chiselsandbits.utils.ModelDataUpdateCoalescer;
 import mod.chiselsandbits.utils.MultiStateSnapshotUtils;
 import mod.chiselsandbits.voxelshape.MultiStateBlockEntityDiscreteVoxelShape;
 import mod.chiselsandbits.voxelshape.SingleBlockVoxelShapeCache;
@@ -83,12 +86,18 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 public class ChiseledBlockEntity extends BlockEntity implements
-        IMultiStateBlockEntity, INetworkUpdatableEntity, IBlockEntityWithModelData {
+        IMultiStateBlockEntity, INetworkUpdatableEntity, IBlockEntityWithModelData, IRevisionedAreaShapeIdentifierProvider {
     public static final float ONE_THOUSANDS = 1 / 1000f;
+    static final int DIRTY_REGION_FRAGMENTATION_FALLBACK_THRESHOLD = 16;
+    private static final int DELTA_SYNC_MAX_DIRTY_REGION_COUNT = 12;
+    private static final int DELTA_SYNC_MAX_BIT_COUNT = 512;
+    private static final long UNKNOWN_NETWORK_SYNC_REVISION = Long.MIN_VALUE;
 
     private MutableStatistics mutableStatistics;
     private final Map<UUID, IBatchMutation> batchMutations = Maps.newConcurrentMap();
     private final Object tagSyncHandle = new Object();
+    private final Object dirtyRegionSyncHandle = new Object();
+    private final Object shapeIdentifierSyncHandle = new Object();
     private IStateEntryStorage storage;
     private IMultiThreadedStorageEngine storageEngine;
     private boolean isInitialized = false;
@@ -99,7 +108,13 @@ public class ChiseledBlockEntity extends BlockEntity implements
     private long storageFutureSequence = 0;
     private final List<CompoundTag> deserializationQueue = Collections.synchronizedList(Lists.newArrayList());
     private final SingleBlockVoxelShapeCache voxelShapeCache = new SingleBlockVoxelShapeCache(this);
-    private final ModelDataUpdateCoalescer modelDataUpdateCoalescer = new ModelDataUpdateCoalescer();
+    private final List<DirtyRegion> pendingDirtyRegions = new ArrayList<>();
+    private List<DirtyRegion> preparedDirtyRegionsForModelDataUpdate = List.of();
+    private List<DirtyRegion> modelUpdateRequestDirtyRegions = List.of();
+    private volatile long storageRevision = 0L;
+    private volatile long cachedShapeIdentifierRevision = Long.MIN_VALUE;
+    private volatile IAreaShapeIdentifier cachedShapeIdentifier = null;
+    private volatile long lastNetworkSyncedStorageRevision = UNKNOWN_NETWORK_SYNC_REVISION;
 
     public ChiseledBlockEntity(BlockPos position, BlockState state) {
         super(ModBlockEntityTypes.CHISELED.get(), position, state);
@@ -136,15 +151,296 @@ public class ChiseledBlockEntity extends BlockEntity implements
     }
 
     public void updateModelData() {
-        this.modelDataUpdateCoalescer.requestUpdate(this::submitModelDataUpdate);
+        synchronized (this.dirtyRegionSyncHandle) {
+            this.modelUpdateRequestDirtyRegions = consumeDirtyRegionsForModelDataUpdateRequestLocked();
+        }
+
+        ChiseledBlockModelDataExecutor.enqueueInteractiveModelDataUpdate(this);
     }
 
-    private void submitModelDataUpdate() {
-        ChiseledBlockModelDataManager.getInstance().updateModelData(this, this::onModelDataUpdateCompleted, false);
+    List<DirtyRegion> consumeDirtyRegionsForModelDataUpdateRequest() {
+        synchronized (this.dirtyRegionSyncHandle) {
+            this.modelUpdateRequestDirtyRegions = consumeDirtyRegionsForModelDataUpdateRequestLocked();
+            return this.modelUpdateRequestDirtyRegions;
+        }
     }
 
-    private void onModelDataUpdateCompleted() {
-        this.modelDataUpdateCoalescer.markCompleted(this::submitModelDataUpdate);
+    List<DirtyRegion> getPreparedDirtyRegionsForModelDataUpdate() {
+        synchronized (this.dirtyRegionSyncHandle) {
+            return List.copyOf(this.preparedDirtyRegionsForModelDataUpdate);
+        }
+    }
+
+    public List<DirtyRegion> getModelUpdateRequestDirtyRegions() {
+        synchronized (this.dirtyRegionSyncHandle) {
+            return List.copyOf(this.modelUpdateRequestDirtyRegions);
+        }
+    }
+
+    void trackDirtyBitChange(final BlockPos inAreaPos) {
+        final int bitsPerSide = StateEntrySize.current().getBitsPerBlockSide();
+        if (inAreaPos.getX() < 0 || inAreaPos.getY() < 0 || inAreaPos.getZ() < 0 ||
+                inAreaPos.getX() >= bitsPerSide || inAreaPos.getY() >= bitsPerSide || inAreaPos.getZ() >= bitsPerSide) {
+            throw new IllegalArgumentException(String.format("Dirty bit position is out of range: %s", inAreaPos));
+        }
+
+        synchronized (this.dirtyRegionSyncHandle) {
+            final List<DirtyRegion> mergedDirtyRegions = mergeDirtyRegionsForTracking(
+                    this.pendingDirtyRegions,
+                    List.of(DirtyRegion.singleBit(inAreaPos.getX(), inAreaPos.getY(), inAreaPos.getZ())),
+                    bitsPerSide
+            );
+            this.pendingDirtyRegions.clear();
+            this.pendingDirtyRegions.addAll(mergedDirtyRegions);
+        }
+    }
+
+    void finalizeDirtyRegionsForModelDataUpdate() {
+        synchronized (this.dirtyRegionSyncHandle) {
+            this.preparedDirtyRegionsForModelDataUpdate = finalizeDirtyRegionsForModelDataUpdate(
+                    this.preparedDirtyRegionsForModelDataUpdate,
+                    this.pendingDirtyRegions,
+                    StateEntrySize.current().getBitsPerBlockSide()
+            );
+            this.pendingDirtyRegions.clear();
+        }
+    }
+
+    private List<DirtyRegion> consumeDirtyRegionsForModelDataUpdateRequestLocked() {
+        final List<DirtyRegion> dirtyRegionsToSubmit = resolveDirtyRegionsForModelDataUpdateRequest(
+                this.preparedDirtyRegionsForModelDataUpdate,
+                StateEntrySize.current().getBitsPerBlockSide()
+        );
+
+        this.preparedDirtyRegionsForModelDataUpdate = List.of();
+        return dirtyRegionsToSubmit;
+    }
+
+    private void trackFullBlockDirtyChange() {
+        final int bitsPerSide = StateEntrySize.current().getBitsPerBlockSide();
+        synchronized (this.dirtyRegionSyncHandle) {
+            this.pendingDirtyRegions.clear();
+            this.pendingDirtyRegions.add(createFullBlockDirtyRegion(bitsPerSide));
+        }
+    }
+
+    static List<DirtyRegion> mergeDirtyRegionsForTracking(
+            final Collection<DirtyRegion> baseDirtyRegions,
+            final Collection<DirtyRegion> additionalDirtyRegions,
+            final int bitsPerSide
+    ) {
+        if (bitsPerSide <= 0) {
+            throw new IllegalArgumentException("bitsPerSide must be greater than zero.");
+        }
+
+        final List<DirtyRegion> mergedDirtyRegions = new ArrayList<>(baseDirtyRegions.size() + additionalDirtyRegions.size());
+        mergedDirtyRegions.addAll(baseDirtyRegions);
+        mergedDirtyRegions.addAll(additionalDirtyRegions);
+
+        if (mergedDirtyRegions.isEmpty()) {
+            return List.of();
+        }
+
+        final List<DirtyRegion> compactedDirtyRegions = new ArrayList<>();
+        for (final DirtyRegion dirtyRegion : mergedDirtyRegions) {
+            mergeDirtyRegionIntoCollection(compactedDirtyRegions, dirtyRegion);
+            applyFragmentationFallbackIfNeeded(compactedDirtyRegions, bitsPerSide);
+        }
+
+        return List.copyOf(compactedDirtyRegions);
+    }
+
+    static List<DirtyRegion> finalizeDirtyRegionsForModelDataUpdate(
+            final Collection<DirtyRegion> preparedDirtyRegions,
+            final Collection<DirtyRegion> pendingDirtyRegions,
+            final int bitsPerSide
+    ) {
+        final List<DirtyRegion> finalizedDirtyRegions = pendingDirtyRegions.isEmpty() ?
+                List.of(createFullBlockDirtyRegion(bitsPerSide)) :
+                List.copyOf(pendingDirtyRegions);
+
+        return mergeDirtyRegionsForTracking(preparedDirtyRegions, finalizedDirtyRegions, bitsPerSide);
+    }
+
+    static List<DirtyRegion> resolveDirtyRegionsForModelDataUpdateRequest(
+            final Collection<DirtyRegion> preparedDirtyRegions,
+            final int bitsPerSide
+    ) {
+        if (preparedDirtyRegions.isEmpty()) {
+            return List.of(createFullBlockDirtyRegion(bitsPerSide));
+        }
+
+        return List.copyOf(preparedDirtyRegions);
+    }
+
+    public IBlockInformation getBlockInformationForDeltaSync(final int x, final int y, final int z) {
+        return this.storage.getBlockInformation(x, y, z).createSnapshot();
+    }
+
+    public void applyNetworkStorageRevision(final long revision) {
+        if (revision < 0L) {
+            return;
+        }
+
+        synchronized (this.shapeIdentifierSyncHandle) {
+            this.storageRevision = revision;
+            this.cachedShapeIdentifierRevision = Long.MIN_VALUE;
+            this.cachedShapeIdentifier = null;
+        }
+
+        this.lastNetworkSyncedStorageRevision = revision;
+    }
+
+    public boolean applyDeltaSyncPayload(
+            final int payloadVersion,
+            final long baseStorageRevision,
+            final long targetStorageRevision,
+            final FriendlyByteBuf payloadBuffer
+    ) {
+        if (payloadVersion != UpdateChiseledBlockDeltaPacket.DELTA_FORMAT_VERSION) {
+            return false;
+        }
+
+        if (baseStorageRevision < 0L || targetStorageRevision < baseStorageRevision) {
+            return false;
+        }
+
+        if (this.getShapeIdentifierRevision() != baseStorageRevision) {
+            return false;
+        }
+
+        final int bitsPerSide = StateEntrySize.current().getBitsPerBlockSide();
+        try {
+            final int dirtyRegionCount = payloadBuffer.readVarInt();
+            if (dirtyRegionCount < 0 || dirtyRegionCount > DELTA_SYNC_MAX_DIRTY_REGION_COUNT) {
+                return false;
+            }
+
+            int totalUpdatedBits = 0;
+            boolean anyStateChanged = false;
+
+            for (int regionIndex = 0; regionIndex < dirtyRegionCount; regionIndex++) {
+                final int minX = payloadBuffer.readUnsignedByte();
+                final int minY = payloadBuffer.readUnsignedByte();
+                final int minZ = payloadBuffer.readUnsignedByte();
+                final int maxX = payloadBuffer.readUnsignedByte();
+                final int maxY = payloadBuffer.readUnsignedByte();
+                final int maxZ = payloadBuffer.readUnsignedByte();
+
+                if (!isValidDeltaRegionBounds(minX, minY, minZ, maxX, maxY, maxZ, bitsPerSide)) {
+                    return false;
+                }
+
+                totalUpdatedBits += calculateDirtyRegionBitCount(minX, minY, minZ, maxX, maxY, maxZ);
+                if (totalUpdatedBits > DELTA_SYNC_MAX_BIT_COUNT) {
+                    return false;
+                }
+
+                for (int x = minX; x <= maxX; x++) {
+                    for (int y = minY; y <= maxY; y++) {
+                        for (int z = minZ; z <= maxZ; z++) {
+                            final BlockInformation incomingInformation = new BlockInformation(payloadBuffer);
+                            final IBlockInformation existingInformation = this.storage.getBlockInformation(x, y, z);
+                            if (Objects.equals(existingInformation, incomingInformation)) {
+                                continue;
+                            }
+
+                            this.storage.setBlockInformation(x, y, z, incomingInformation);
+                            trackDirtyBitChange(new BlockPos(x, y, z));
+                            anyStateChanged = true;
+                        }
+                    }
+                }
+            }
+
+            if (payloadBuffer.isReadable()) {
+                return false;
+            }
+
+            applyNetworkStorageRevision(targetStorageRevision);
+            if (anyStateChanged) {
+                this.mutableStatistics.recalculate(this.storage, shouldUpdateWorld());
+                this.mutableStatistics.updatePrimaryState(shouldUpdateWorld());
+                this.voxelShapeCache.reset();
+                finalizeDirtyRegionsForModelDataUpdate();
+                updateModelDataIfInLoadedChunk();
+            }
+
+            return true;
+        } catch (Exception exception) {
+            return false;
+        }
+    }
+
+    private static int calculateDirtyRegionBitCount(
+            final int minX,
+            final int minY,
+            final int minZ,
+            final int maxX,
+            final int maxY,
+            final int maxZ
+    ) {
+        return (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+    }
+
+    private static boolean isValidDeltaRegionBounds(
+            final int minX,
+            final int minY,
+            final int minZ,
+            final int maxX,
+            final int maxY,
+            final int maxZ,
+            final int bitsPerSide
+    ) {
+        if (minX > maxX || minY > maxY || minZ > maxZ) {
+            return false;
+        }
+
+        return minX >= 0 && minY >= 0 && minZ >= 0 &&
+                maxX < bitsPerSide && maxY < bitsPerSide && maxZ < bitsPerSide;
+    }
+
+    private static DirtyRegion createFullBlockDirtyRegion(final int bitsPerSide) {
+        return DirtyRegion.fullBlock(bitsPerSide);
+    }
+
+    private static void mergeDirtyRegionIntoCollection(
+            final List<DirtyRegion> targetDirtyRegions,
+            final DirtyRegion dirtyRegion
+    ) {
+        DirtyRegion mergedRegion = dirtyRegion;
+        boolean merged;
+        do {
+            merged = false;
+            final Iterator<DirtyRegion> iterator = targetDirtyRegions.iterator();
+            while (iterator.hasNext()) {
+                final DirtyRegion existingRegion = iterator.next();
+                if (existingRegion.intersectsOrAdjacent(mergedRegion)) {
+                    mergedRegion = existingRegion.merge(mergedRegion);
+                    iterator.remove();
+                    merged = true;
+                }
+            }
+        } while (merged);
+
+        targetDirtyRegions.add(mergedRegion);
+    }
+
+    private static void applyFragmentationFallbackIfNeeded(final List<DirtyRegion> dirtyRegions, final int bitsPerSide) {
+        if (dirtyRegions.size() <= DIRTY_REGION_FRAGMENTATION_FALLBACK_THRESHOLD) {
+            return;
+        }
+
+        dirtyRegions.clear();
+        dirtyRegions.add(createFullBlockDirtyRegion(bitsPerSide));
+    }
+
+    private void markStorageRevisionChanged() {
+        synchronized (this.shapeIdentifierSyncHandle) {
+            this.storageRevision += 1L;
+            this.cachedShapeIdentifierRevision = Long.MIN_VALUE;
+            this.cachedShapeIdentifier = null;
+        }
     }
 
     private void updateModelDataIfInLoadedChunk() {
@@ -176,7 +472,32 @@ public class ChiseledBlockEntity extends BlockEntity implements
 
     @Override
     public IAreaShapeIdentifier createNewShapeIdentifier() {
-        return new Identifier(this.storage);
+        return getCachedShapeIdentifier();
+    }
+
+    @Override
+    public long getShapeIdentifierRevision() {
+        return this.storageRevision;
+    }
+
+    @Override
+    public IAreaShapeIdentifier getCachedShapeIdentifier() {
+        final long observedRevision = this.storageRevision;
+        final IAreaShapeIdentifier cachedIdentifier = this.cachedShapeIdentifier;
+        if (cachedIdentifier != null && this.cachedShapeIdentifierRevision == observedRevision) {
+            return cachedIdentifier;
+        }
+
+        synchronized (this.shapeIdentifierSyncHandle) {
+            if (this.cachedShapeIdentifier != null && this.cachedShapeIdentifierRevision == this.storageRevision) {
+                return this.cachedShapeIdentifier;
+            }
+
+            final IAreaShapeIdentifier rebuiltIdentifier = new Identifier(this.storage);
+            this.cachedShapeIdentifier = rebuiltIdentifier;
+            this.cachedShapeIdentifierRevision = this.storageRevision;
+            return rebuiltIdentifier;
+        }
     }
 
     @Override
@@ -590,6 +911,9 @@ public class ChiseledBlockEntity extends BlockEntity implements
         }
 
         super.setChanged();
+        finalizeDirtyRegionsForModelDataUpdate();
+        final List<DirtyRegion> dirtyRegionsForNetworkSync = getPreparedDirtyRegionsForModelDataUpdate();
+        final long storageRevisionForNetworkSync = this.getShapeIdentifierRevision();
 
         getLevel().getLightEngine().checkBlock(getBlockPos());
         getLevel().sendBlockUpdated(getBlockPos(), Blocks.AIR.defaultBlockState(), getBlockState(), Block.UPDATE_ALL);
@@ -617,12 +941,77 @@ public class ChiseledBlockEntity extends BlockEntity implements
                                 () -> this.setOffThreadSaveResult(currentStorageFutureSequence, tag), this.storageEngine
                         ));
 
+                final ModPacket syncPacket = createNetworkSyncPacket(dirtyRegionsForNetworkSync, storageRevisionForNetworkSync);
                 ChiselsAndBits.getInstance().getNetworkChannel().sendToTrackingChunk(
-                        new UpdateChiseledBlockPacket(this),
+                        syncPacket,
                         getLevel().getChunkAt(getBlockPos())
                 );
             }
         }
+    }
+
+    private ModPacket createNetworkSyncPacket(final List<DirtyRegion> dirtyRegions, final long currentStorageRevision) {
+        if (shouldUseDeltaSyncPacket(dirtyRegions, currentStorageRevision)) {
+            final long baseRevision = this.lastNetworkSyncedStorageRevision;
+            final ModPacket deltaPacket = new UpdateChiseledBlockDeltaPacket(this, baseRevision, currentStorageRevision, dirtyRegions);
+            this.lastNetworkSyncedStorageRevision = currentStorageRevision;
+            return deltaPacket;
+        }
+
+        this.lastNetworkSyncedStorageRevision = currentStorageRevision;
+        return new UpdateChiseledBlockPacket(this, currentStorageRevision);
+    }
+
+    private boolean shouldUseDeltaSyncPacket(final List<DirtyRegion> dirtyRegions, final long currentStorageRevision) {
+        if (dirtyRegions == null || dirtyRegions.isEmpty()) {
+            return false;
+        }
+
+        if (this.lastNetworkSyncedStorageRevision == UNKNOWN_NETWORK_SYNC_REVISION) {
+            return false;
+        }
+
+        if (currentStorageRevision <= this.lastNetworkSyncedStorageRevision) {
+            return false;
+        }
+
+        if (dirtyRegions.size() > DELTA_SYNC_MAX_DIRTY_REGION_COUNT) {
+            return false;
+        }
+
+        final int bitsPerSide = StateEntrySize.current().getBitsPerBlockSide();
+        int totalDirtyBits = 0;
+        for (final DirtyRegion dirtyRegion : dirtyRegions) {
+            if (dirtyRegion == null || dirtyRegion.isFullBlock(bitsPerSide)) {
+                return false;
+            }
+
+            if (!isValidDeltaRegionBounds(
+                    dirtyRegion.minX(),
+                    dirtyRegion.minY(),
+                    dirtyRegion.minZ(),
+                    dirtyRegion.maxX(),
+                    dirtyRegion.maxY(),
+                    dirtyRegion.maxZ(),
+                    bitsPerSide
+            )) {
+                return false;
+            }
+
+            totalDirtyBits += calculateDirtyRegionBitCount(
+                    dirtyRegion.minX(),
+                    dirtyRegion.minY(),
+                    dirtyRegion.minZ(),
+                    dirtyRegion.maxX(),
+                    dirtyRegion.maxY(),
+                    dirtyRegion.maxZ()
+            );
+            if (totalDirtyBits > DELTA_SYNC_MAX_BIT_COUNT) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private boolean shouldUpdateWorld() {
@@ -639,6 +1028,9 @@ public class ChiseledBlockEntity extends BlockEntity implements
     public void deserializeFrom(@NotNull final FriendlyByteBuf packetBuffer) {
         storage.deserializeFrom(packetBuffer);
         mutableStatistics.deserializeFrom(packetBuffer);
+        markStorageRevisionChanged();
+        trackFullBlockDirtyChange();
+        finalizeDirtyRegionsForModelDataUpdate();
         updateModelDataIfInLoadedChunk();
     }
 
@@ -708,6 +1100,11 @@ public class ChiseledBlockEntity extends BlockEntity implements
         }
 
         if (getLevel() != null) {
+            final boolean stateChanged = !Objects.equals(newInformation, information);
+            if (stateChanged) {
+                markStorageRevisionChanged();
+                trackDirtyBitChange(inAreaPos);
+            }
             setChanged();
         }
     }
@@ -783,6 +1180,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
                 inAreaPos.getZ(),
                 blockState
         );
+        markStorageRevisionChanged();
 
         if (blockState.isAir() && !currentInformation.isAir()) {
             mutableStatistics.onBlockStateRemoved(currentInformation, inAreaPos, shouldUpdateWorld());
@@ -793,6 +1191,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
         }
 
         if (getLevel() != null) {
+            trackDirtyBitChange(inAreaPos);
             setChanged();
         }
     }
@@ -828,6 +1227,8 @@ public class ChiseledBlockEntity extends BlockEntity implements
         //Large operation, better batch this together to prevent weird updates.
         try (final IBatchMutation ignored = batch()) {
             this.storage.rotate(axis, rotationCount);
+            markStorageRevisionChanged();
+            trackFullBlockDirtyChange();
             this.mutableStatistics.recalculate(this.storage);
         }
     }
@@ -841,6 +1242,8 @@ public class ChiseledBlockEntity extends BlockEntity implements
         //Large operation, better batch this together to prevent weird updates.
         try (final IBatchMutation ignored = batch()) {
             this.storage.mirror(axis);
+            markStorageRevisionChanged();
+            trackFullBlockDirtyChange();
             this.mutableStatistics.recalculate(this.storage);
         }
     }
@@ -853,6 +1256,8 @@ public class ChiseledBlockEntity extends BlockEntity implements
 
         try (IBatchMutation ignored = batch()) {
             this.storage.initializeWith(newInitialInformation);
+            markStorageRevisionChanged();
+            trackFullBlockDirtyChange();
             this.mutableStatistics.initializeWith(newInitialInformation);
         }
     }
@@ -2103,6 +2508,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
         public void syncPayloadOnGameThread(Payload payload) {
             storage = payload.storage;
             mutableStatistics = payload.mutableStatistics;
+            markStorageRevisionChanged();
             isInitialized = true;
         }
 
@@ -2121,6 +2527,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
             {
                 storage.deserializeNBT(compoundTag.getCompound(NbtConstants.CHISELED_DATA));
                 mutableStatistics.deserializeNBT(compoundTag.getCompound(NbtConstants.STATISTICS));
+                markStorageRevisionChanged();
             });
         }
 
@@ -2134,6 +2541,7 @@ public class ChiseledBlockEntity extends BlockEntity implements
         public void deserializeFrom(@NotNull FriendlyByteBuf packetBuffer) {
             storage.deserializeFrom(packetBuffer);
             mutableStatistics.deserializeFrom(packetBuffer);
+            markStorageRevisionChanged();
         }
 
         private record Payload(IStateEntryStorage storage, MutableStatistics mutableStatistics) {

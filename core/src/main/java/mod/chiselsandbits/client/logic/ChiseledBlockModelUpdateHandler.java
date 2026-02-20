@@ -1,6 +1,7 @@
 package mod.chiselsandbits.client.logic;
 
 import mod.chiselsandbits.block.entities.ChiseledBlockEntity;
+import mod.chiselsandbits.client.model.data.ChiseledBlockModelDataExecutor;
 import net.minecraft.world.level.chunk.LevelChunk;
 
 public class ChiseledBlockModelUpdateHandler
@@ -13,7 +14,7 @@ public class ChiseledBlockModelUpdateHandler
                 .forEach(blockEntity ->
                 {
                     if (blockEntity instanceof ChiseledBlockEntity chiseledBlockEntity)
-                        chiseledBlockEntity.updateModelData();
+                        ChiseledBlockModelDataExecutor.enqueueChunkLoadModelDataUpdate(chiseledBlockEntity);
                 });
     }
 

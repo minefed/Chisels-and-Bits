@@ -2,8 +2,6 @@ package mod.chiselsandbits.client.model.baked.face.model;
 
 import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import mod.chiselsandbits.client.model.baked.BakedQuadBuilder;
 import org.jetbrains.annotations.NotNull;
 
@@ -11,45 +9,70 @@ import java.util.Collection;
 
 public class BakedQuadAdapter extends BakedQuadBuilder {
 
-    private final Int2ObjectMap<VertexData> indexToVertexData = new Int2ObjectOpenHashMap<>();
-    private final int colorOverride;
+    private static final int VERTEX_COUNT = 4;
 
-    public BakedQuadAdapter(Collection<VertexData> adaptionData, int colorOverride) {
+    private final VertexData[] vertexDataByIndex = new VertexData[VERTEX_COUNT];
+    private final boolean useColorOverride;
+    private final float colorR;
+    private final float colorG;
+    private final float colorB;
+    private final float colorA;
+
+    public BakedQuadAdapter(final Collection<VertexData> adaptationData, final int colorOverride) {
+        this(colorOverride);
+        adaptationData.forEach(this::registerVertexData);
+    }
+
+    public BakedQuadAdapter(final VertexData[] adaptationData, final int colorOverride) {
+        this(colorOverride);
+        for (final VertexData vertexData : adaptationData) {
+            registerVertexData(vertexData);
+        }
+    }
+
+    private BakedQuadAdapter(final int colorOverride) {
         super();
-        adaptionData.forEach(data -> indexToVertexData.put(data.vertexIndex(), data));
-        this.colorOverride = colorOverride;
+        this.useColorOverride = colorOverride != -1;
+        this.colorR = ((colorOverride >> 16) & 0xFF) / 255.0F;
+        this.colorG = ((colorOverride >> 8) & 0xFF) / 255.0F;
+        this.colorB = (colorOverride & 0xFF) / 255.0F;
+        this.colorA = ((colorOverride >> 24) & 0xFF) / 255.0F;
+    }
+
+    private void registerVertexData(final VertexData vertexData) {
+        final int vertexIndex = vertexData.vertexIndex();
+        if (0 <= vertexIndex && vertexIndex < VERTEX_COUNT) {
+            vertexDataByIndex[vertexIndex] = vertexData;
+        }
     }
 
     @Override
     public void put(final int vertexIndex,
                     final int elementIndex,
                     final float @NotNull ... data) {
-        if (indexToVertexData.containsKey(vertexIndex)) {
-            final VertexFormat format = getVertexFormat();
-            final VertexFormatElement element = format.getElements().get(elementIndex);
+        if (0 <= vertexIndex && vertexIndex < VERTEX_COUNT) {
+            final VertexData vertexData = vertexDataByIndex[vertexIndex];
+            if (vertexData != null) {
+                final VertexFormat format = getVertexFormat();
+                final VertexFormatElement element = format.getElements().get(elementIndex);
 
-            if (element.isPosition()) {
-                final VertexData vertexData = indexToVertexData.get(vertexIndex);
-                final float[] positionData = vertexData.positionData();
-                super.put(vertexIndex, elementIndex, positionData);
-            } else if (element.getUsage() == VertexFormatElement.Usage.UV && element.getIndex() == 0) {
-                final VertexData vertexData = indexToVertexData.get(vertexIndex);
-                final float[] uvData = vertexData.uvData();
-                super.put(vertexIndex, elementIndex, uvData);
-            } else if (element.getUsage() == VertexFormatElement.Usage.COLOR && this.colorOverride != -1) {
-                final float[] colorData = new float[4];
-                colorData[0] = ((this.colorOverride >> 16) & 0xFF) / 255.0F;
-                colorData[1] = ((this.colorOverride >> 8) & 0xFF) / 255.0F;
-                colorData[2] = (this.colorOverride & 0xFF) / 255.0F;
-                colorData[3] = ((this.colorOverride >> 24) & 0xFF) / 255.0F;
-                super.put(vertexIndex, elementIndex, colorData);
-            } else {
-                super.put(vertexIndex, elementIndex, data);
+                if (element.isPosition()) {
+                    super.put(vertexIndex, elementIndex, vertexData.x(), vertexData.y(), vertexData.z(), 0f);
+                    return;
+                }
+
+                if (element.getUsage() == VertexFormatElement.Usage.UV && element.getIndex() == 0) {
+                    super.put(vertexIndex, elementIndex, vertexData.u(), vertexData.v(), 0f, 0f);
+                    return;
+                }
+
+                if (element.getUsage() == VertexFormatElement.Usage.COLOR && useColorOverride) {
+                    super.put(vertexIndex, elementIndex, colorR, colorG, colorB, colorA);
+                    return;
+                }
             }
         }
-        else
-        {
-            super.put(vertexIndex, elementIndex, data);
-        }
+
+        super.put(vertexIndex, elementIndex, data);
     }
 }

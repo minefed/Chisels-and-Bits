@@ -5,7 +5,6 @@ import com.communi.suggestu.scena.core.client.models.baked.IDataAwareBakedModel;
 import com.communi.suggestu.scena.core.client.rendering.IRenderingManager;
 import com.communi.suggestu.scena.core.fluid.FluidInformation;
 import com.communi.suggestu.scena.core.registries.IPlatformRegistryManager;
-import com.google.common.collect.Lists;
 import mod.chiselsandbits.api.blockinformation.IBlockInformation;
 import mod.chiselsandbits.api.client.color.IBlockInformationColorManager;
 import mod.chiselsandbits.api.client.model.baked.cache.IBakedModelCacheKey;
@@ -39,7 +38,7 @@ import org.apache.logging.log4j.Logger;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.Collection;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -51,7 +50,7 @@ public final class FaceManager {
 
     private static final FaceManager INSTANCE = new FaceManager();
 
-    private final SimpleMaxSizedCache<Key, Collection<ModelQuadLayer>> cache = new SimpleMaxSizedCache<>(
+    private final SimpleMaxSizedCache<Key, List<ModelQuadLayer>> cache = new SimpleMaxSizedCache<>(
             IClientConfiguration.getInstance().getFaceLayerCacheSize()::get
     );
     private final SimpleMaxSizedCache<IBlockInformation, Integer> colorCache = new SimpleMaxSizedCache<>(
@@ -390,14 +389,14 @@ public final class FaceManager {
         colorCache.clear();
     }
 
-    public Collection<ModelQuadLayer> getCachedLayersFor(
+    public List<ModelQuadLayer> getCachedLayersFor(
             final IBlockInformation state,
             final Direction face,
             final RenderType layer,
             long primaryStateRenderSeed,
             @NotNull RenderType renderType) {
         if (layer == null) {
-            return null;
+            return Collections.emptyList();
         }
 
         final BakedModel model = solveModel(state, Minecraft.getInstance().getBlockRenderer().getBlockModelShaper().getBlockModel(state.getBlockState()), primaryStateRenderSeed, renderType);
@@ -448,7 +447,7 @@ public final class FaceManager {
             return Collections.singletonList(builder.build());
         }
 
-        final List<ModelQuadLayer> layers = Lists.newArrayList();
+        final List<ModelQuadLayer> layers = new ArrayList<>();
         final int color = getColorFor(blockInformation);
 
         if (model != null) {

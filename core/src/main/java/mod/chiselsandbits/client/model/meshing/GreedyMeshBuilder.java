@@ -6,12 +6,15 @@ import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import mod.chiselsandbits.api.blockinformation.IBlockInformation;
 import mod.chiselsandbits.api.multistate.StateEntrySize;
+import mod.chiselsandbits.api.profiling.IProfilerSection;
+import mod.chiselsandbits.profiling.ProfilingManager;
 import net.minecraft.core.Direction;
 import org.jetbrains.annotations.NotNull;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 public class GreedyMeshBuilder {
 
@@ -26,105 +29,123 @@ public class GreedyMeshBuilder {
         IBlockInformation getMaterial(int x, int y, int z);
     }
 
+    @FunctionalInterface
+    interface SliceSelector {
+        boolean include(int dimension, int sliceIndex);
+    }
+
     public static GreedyMeshFace[] buildMesh(MaterialProvider data) {
-        final List<GreedyMeshFace> faces = new ArrayList<>();
-        final int sizePerDimension = StateEntrySize.current().getBitsPerBlockSide();
+        return buildMesh(data, (dimension, sliceIndex) -> true);
+    }
 
-        final Object2IntMap<IBlockInformation> indexByMaterial = new Object2IntOpenHashMap<>();
-        final Int2ObjectMap<IBlockInformation> materialByIndex = new Int2ObjectOpenHashMap<>();
-        final int[] mask = new int[sizePerDimension * sizePerDimension]; // The mask is used to keep track of which faces have been added to the mesh.
+    static GreedyMeshFace[] buildMesh(final MaterialProvider data, final SliceSelector sliceSelector) {
+        Objects.requireNonNull(data, "data");
+        Objects.requireNonNull(sliceSelector, "sliceSelector");
 
-        class MaterialProcessor {
-            final int getMaterialIndex(int x, int y, int z) {
-                final IBlockInformation blockInformation = data.getMaterial(x, y, z);
+        try (IProfilerSection ignored = ProfilingManager.getInstance().withSection(ProfilingManager.SECTION_MESH_GENERATION)) {
+            final List<GreedyMeshFace> faces = new ArrayList<>();
+            final int sizePerDimension = StateEntrySize.current().getBitsPerBlockSide();
 
-                if (blockInformation.isAir())
-                    return 0;
+            final Object2IntMap<IBlockInformation> indexByMaterial = new Object2IntOpenHashMap<>();
+            final Int2ObjectMap<IBlockInformation> materialByIndex = new Int2ObjectOpenHashMap<>();
+            final int[] mask = new int[sizePerDimension * sizePerDimension]; // The mask is used to keep track of which faces have been added to the mesh.
 
-                return indexByMaterial.computeIfAbsent(blockInformation, k -> {
-                    int index = indexByMaterial.size() + 1;
-                    materialByIndex.put(index, blockInformation);
-                    return index;
-                });
+            class MaterialProcessor {
+                final int getMaterialIndex(int x, int y, int z) {
+                    final IBlockInformation blockInformation = data.getMaterial(x, y, z);
+
+                    if (blockInformation.isAir())
+                        return 0;
+
+                    return indexByMaterial.computeIfAbsent(blockInformation, k -> {
+                        int index = indexByMaterial.size() + 1;
+                        materialByIndex.put(index, blockInformation);
+                        return index;
+                    });
+                }
             }
-        }
 
-        final MaterialProcessor materialProcessor = new MaterialProcessor();
+            final MaterialProcessor materialProcessor = new MaterialProcessor();
 
-        for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
-            int currentFirstDimensionIter, currentSecondDimensionIter;  // The current iteration position in the x, y, and z dimensions, also known as i, j, and k.
-            int width, height; //The current iteration dimensions in the x, y, and z dimensions, also known as l, w, and h.
+            for (int dimension = 0; dimension < DIMENSIONS; dimension++) {
+                int currentFirstDimensionIter, currentSecondDimensionIter;  // The current iteration position in the x, y, and z dimensions, also known as i, j, and k.
+                int width, height; //The current iteration dimensions in the x, y, and z dimensions, also known as l, w, and h.
 
-            //We need to iterate over the other two dimensions.
-            final int firstDimensionIter = (dimension + 1) % DIMENSIONS; // The u and v dimensions are used to iterate over the other two dimensions.
-            final int secondDimensionIter = (dimension + 2) % DIMENSIONS;
+                //We need to iterate over the other two dimensions.
+                final int firstDimensionIter = (dimension + 1) % DIMENSIONS; // The u and v dimensions are used to iterate over the other two dimensions.
+                final int secondDimensionIter = (dimension + 2) % DIMENSIONS;
 
-            final int[] dimensionalIterator = new int[]{0, 0, 0};
-            final int[] calculatedDimensionsOffset = new int[]{0, 0, 0}; //Dimension offset for the already calculated dimensions.
+                final int[] dimensionalIterator = new int[]{0, 0, 0};
+                final int[] calculatedDimensionsOffset = new int[]{0, 0, 0}; //Dimension offset for the already calculated dimensions.
 
-            calculatedDimensionsOffset[dimension] = 1;
-            for (dimensionalIterator[dimension] = -1; dimensionalIterator[dimension] < sizePerDimension; ) {
+                calculatedDimensionsOffset[dimension] = 1;
+                for (dimensionalIterator[dimension] = -1; dimensionalIterator[dimension] < sizePerDimension; ) {
+                    if (!sliceSelector.include(dimension, dimensionalIterator[dimension])) {
+                        dimensionalIterator[dimension]++;
+                        continue;
+                    }
 
-                //Compute mask
-                int maskIndex = 0;
-                for (dimensionalIterator[secondDimensionIter] = 0; dimensionalIterator[secondDimensionIter] < sizePerDimension; ++dimensionalIterator[secondDimensionIter]) {
-                    for (dimensionalIterator[firstDimensionIter] = 0; dimensionalIterator[firstDimensionIter] < sizePerDimension; ++dimensionalIterator[firstDimensionIter], ++maskIndex) {
+                    //Compute mask
+                    int maskIndex = 0;
+                    for (dimensionalIterator[secondDimensionIter] = 0; dimensionalIterator[secondDimensionIter] < sizePerDimension; ++dimensionalIterator[secondDimensionIter]) {
+                        for (dimensionalIterator[firstDimensionIter] = 0; dimensionalIterator[firstDimensionIter] < sizePerDimension; ++dimensionalIterator[firstDimensionIter], ++maskIndex) {
 
-                        int currentMaterial = (0 <= dimensionalIterator[dimension] ? materialProcessor.getMaterialIndex(
-                                dimensionalIterator[0],
-                                dimensionalIterator[1],
-                                dimensionalIterator[2]) : 0);
-                        int neighborMaterial = (dimensionalIterator[dimension] < sizePerDimension - 1 ? materialProcessor.getMaterialIndex(
-                                dimensionalIterator[0] + calculatedDimensionsOffset[0],
-                                dimensionalIterator[1] + calculatedDimensionsOffset[1],
-                                dimensionalIterator[2] + calculatedDimensionsOffset[2]) : 0);
+                            int currentMaterial = (0 <= dimensionalIterator[dimension] ? materialProcessor.getMaterialIndex(
+                                    dimensionalIterator[0],
+                                    dimensionalIterator[1],
+                                    dimensionalIterator[2]) : 0);
+                            int neighborMaterial = (dimensionalIterator[dimension] < sizePerDimension - 1 ? materialProcessor.getMaterialIndex(
+                                    dimensionalIterator[0] + calculatedDimensionsOffset[0],
+                                    dimensionalIterator[1] + calculatedDimensionsOffset[1],
+                                    dimensionalIterator[2] + calculatedDimensionsOffset[2]) : 0);
 
-                        boolean aIsTruthy = currentMaterial != 0;
-                        boolean bIsTruthy = neighborMaterial != 0;
+                            boolean aIsTruthy = currentMaterial != 0;
+                            boolean bIsTruthy = neighborMaterial != 0;
 
-                        if (aIsTruthy == bIsTruthy) {
-                            mask[maskIndex] = 0;
-                        } else if (aIsTruthy) {
-                            mask[maskIndex] = currentMaterial;
-                        } else {
-                            mask[maskIndex] = -neighborMaterial;
+                            if (aIsTruthy == bIsTruthy) {
+                                mask[maskIndex] = 0;
+                            } else if (aIsTruthy) {
+                                mask[maskIndex] = currentMaterial;
+                            } else {
+                                mask[maskIndex] = -neighborMaterial;
+                            }
+                        }
+                    }
+
+                    //Increment the computed position in the current dimension
+                    dimensionalIterator[dimension]++;
+
+                    //Compute the mesh
+                    maskIndex = 0;
+                    for (currentSecondDimensionIter = 0; currentSecondDimensionIter < sizePerDimension; ++currentSecondDimensionIter) {
+                        for(currentFirstDimensionIter = 0; currentFirstDimensionIter < sizePerDimension;) {
+                            int materialMask = mask[maskIndex];
+                            boolean isMaterialMaskTruthy = materialMask != 0;
+                            if (isMaterialMaskTruthy) {
+                                width = computeWidth(materialMask, mask, maskIndex, currentFirstDimensionIter, sizePerDimension);
+                                height = computeHeight(currentSecondDimensionIter, sizePerDimension, width, mask, maskIndex, materialMask);
+
+                                dimensionalIterator[firstDimensionIter] = currentFirstDimensionIter;
+                                dimensionalIterator[secondDimensionIter] = currentSecondDimensionIter;
+
+                                final GreedyMeshFace face = generateFace(materialMask, secondDimensionIter, height, firstDimensionIter, width, materialByIndex, dimensionalIterator, dimension, sizePerDimension);
+                                faces.add(face);
+
+                                clearMask(height, width, mask, maskIndex, sizePerDimension);
+
+                                currentFirstDimensionIter += width;
+                                maskIndex += width;
+                            } else {
+                                ++currentFirstDimensionIter;
+                                ++maskIndex;
+                            }
                         }
                     }
                 }
-
-                //Increment the computed position in the current dimension
-                dimensionalIterator[dimension]++;
-
-                //Compute the mesh
-                maskIndex = 0;
-                for (currentSecondDimensionIter = 0; currentSecondDimensionIter < sizePerDimension; ++currentSecondDimensionIter) {
-                    for(currentFirstDimensionIter = 0; currentFirstDimensionIter < sizePerDimension;) {
-                        int materialMask = mask[maskIndex];
-                        boolean isMaterialMaskTruthy = materialMask != 0;
-                        if (isMaterialMaskTruthy) {
-                            width = computeWidth(materialMask, mask, maskIndex, currentFirstDimensionIter, sizePerDimension);
-                            height = computeHeight(currentSecondDimensionIter, sizePerDimension, width, mask, maskIndex, materialMask);
-
-                            dimensionalIterator[firstDimensionIter] = currentFirstDimensionIter;
-                            dimensionalIterator[secondDimensionIter] = currentSecondDimensionIter;
-
-                            final GreedyMeshFace face = generateFace(materialMask, secondDimensionIter, height, firstDimensionIter, width, materialByIndex, dimensionalIterator, dimension, sizePerDimension);
-                            faces.add(face);
-
-                            clearMask(height, width, mask, maskIndex, sizePerDimension);
-
-                            currentFirstDimensionIter += width;
-                            maskIndex += width;
-                        } else {
-                            ++currentFirstDimensionIter;
-                            ++maskIndex;
-                        }
-                    }
-                }
             }
-        }
 
-        return faces.toArray(new GreedyMeshFace[0]);
+            return faces.toArray(new GreedyMeshFace[0]);
+        }
     }
 
     private static void clearMask(int height, int width, int[] mask, int maskIndex, int sizePerDimension) {

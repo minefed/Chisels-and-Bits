@@ -6,10 +6,13 @@ import mod.chiselsandbits.api.multistate.StateEntrySize;
 import mod.chiselsandbits.api.multistate.accessor.IAreaAccessor;
 import mod.chiselsandbits.api.multistate.accessor.IStateEntryInfo;
 import mod.chiselsandbits.api.profiling.IProfilerSection;
+import mod.chiselsandbits.block.entities.ChiseledBlockEntity;
 import mod.chiselsandbits.blockinformation.BlockInformation;
 import mod.chiselsandbits.client.model.baked.base.BaseBakedBlockModel;
+import mod.chiselsandbits.client.model.meshing.DirtyRegion;
 import mod.chiselsandbits.client.model.meshing.GreedyMeshBuilder;
 import mod.chiselsandbits.client.model.meshing.GreedyMeshFace;
+import mod.chiselsandbits.client.model.meshing.IncrementalGreedyMeshBuilder;
 import mod.chiselsandbits.client.util.QuadGenerationUtils;
 import mod.chiselsandbits.profiling.ProfilingManager;
 import net.minecraft.client.Minecraft;
@@ -35,6 +38,8 @@ public class ChiseledBlockBakedModel extends BaseBakedBlockModel {
             ChiselRenderType.SOLID,
             null,
             0);
+    private static final Map<IAreaAccessor, GreedyMeshFace[]> CACHED_MESH_FACES =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     private final ChiselRenderType chiselRenderType;
 
@@ -134,17 +139,19 @@ public class ChiseledBlockBakedModel extends BaseBakedBlockModel {
             final long primaryStateRenderSeed) {
         final GreedyMeshFace[] faces;
         try (final IProfilerSection ignoredFaceProcessing = ProfilingManager.getInstance().withSection("processing")) {
-            faces =
-                    GreedyMeshBuilder.buildMesh(
-                            (x, y, z) -> accessor.getInAreaTarget(
-                                            new Vec3(
-                                                    x * StateEntrySize.current().getSizePerBit(),
-                                                    y * StateEntrySize.current().getSizePerBit(),
-                                                    z * StateEntrySize.current().getSizePerBit()
-                                            )
-                                    ).map(IStateEntryInfo::getBlockInformation)
-                                    .orElse(IBlockInformation.AIR)
-                    );
+            final GreedyMeshBuilder.MaterialProvider materialProvider = (x, y, z) -> accessor.getInAreaTarget(
+                            new Vec3(
+                                    x * StateEntrySize.current().getSizePerBit(),
+                                    y * StateEntrySize.current().getSizePerBit(),
+                                    z * StateEntrySize.current().getSizePerBit()
+                            )
+                    ).map(IStateEntryInfo::getBlockInformation)
+                    .orElse(IBlockInformation.AIR);
+
+            final GreedyMeshFace[] previousMeshFaces = getCachedMeshFaces(accessor);
+            final List<DirtyRegion> dirtyRegions = getDirtyRegions(accessor);
+            faces = IncrementalGreedyMeshBuilder.rebuildMesh(materialProvider, previousMeshFaces, dirtyRegions);
+            cacheMeshFaces(accessor, faces);
         }
 
         try (final IProfilerSection ignoredQuadGeneration = ProfilingManager.getInstance().withSection("quadGeneration")) {
@@ -158,6 +165,26 @@ public class ChiseledBlockBakedModel extends BaseBakedBlockModel {
 
                 QuadGenerationUtils.generateQuads(target, primaryStateRenderSeed, chiselRenderType.layer, region.faceValue(), cullDirection, region.lowerLeft(), region.upperRight());
             }
+        }
+    }
+
+    private static List<DirtyRegion> getDirtyRegions(final IAreaAccessor accessor) {
+        if (accessor instanceof ChiseledBlockEntity chiseledBlockEntity) {
+            return chiseledBlockEntity.getModelUpdateRequestDirtyRegions();
+        }
+
+        return List.of(DirtyRegion.fullBlock(StateEntrySize.current().getBitsPerBlockSide()));
+    }
+
+    private static GreedyMeshFace[] getCachedMeshFaces(final IAreaAccessor accessor) {
+        synchronized (CACHED_MESH_FACES) {
+            return CACHED_MESH_FACES.get(accessor);
+        }
+    }
+
+    private static void cacheMeshFaces(final IAreaAccessor accessor, final GreedyMeshFace[] faces) {
+        synchronized (CACHED_MESH_FACES) {
+            CACHED_MESH_FACES.put(accessor, faces);
         }
     }
 
