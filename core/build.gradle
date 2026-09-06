@@ -6,6 +6,11 @@ project.addApiProject()
 
 project.minecraft.accessTransformers.file project(":common").file("accesstransformer.cfg")
 
+// NeoGradle's access transformer requires Java 21; mod compilation remains on Java 17.
+tasks.withType(net.neoforged.gradle.common.runtime.tasks.BinaryAccessTransformer).configureEach {
+    javaVersion.set(JavaLanguageVersion.of(21))
+}
+
 project.dependencies.implementation "net.minecraft:client:${project.minecraftVersion}"
 project.dependencies.implementation "com.communi-suggestu.scena:scena-core:${project.scenaVersion}"
 project.dependencies.implementation "org.lz4:lz4-pure-java:${project.lz4Version}"
