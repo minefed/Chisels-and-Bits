@@ -121,9 +121,12 @@ public final class ModEventHandler {
                     .filter(ChiseledBlockEntity.class::isInstance)
                     .map(ChiseledBlockEntity.class::cast)
                     .forEach(chiseledBlockEntity -> {
-                        ChiselsAndBits.getInstance().getNetworkChannel().sendToTrackingChunk(
+                        // Only the player that just received the chunk needs the full state; every other
+                        // tracking player already got it through its own chunk sent event and the incremental
+                        // block entity syncs since then.
+                        ChiselsAndBits.getInstance().getNetworkChannel().sendToPlayer(
                                 new UpdateChiseledBlockPacket(chiseledBlockEntity),
-                                serverLevel.getChunkAt(chiseledBlockEntity.getBlockPos())
+                                serverPlayer
                         );
                     });
         });
