@@ -42,14 +42,17 @@ public class SimpleMaxSizedCache<K, V>
     }
 
     public V get(final K key, final Supplier<V> valueSupplier) {
-        if (!cache.containsKey(key))
+        // ConcurrentHashMap cannot contain null values, so one lookup also tests presence.
+        // In particular, avoid hashing a model's potentially large NBT key twice on a hit.
+        final V cachedValue = cache.get(key);
+        if (cachedValue != null)
         {
-            final V value = valueSupplier.get();
-            put(key, value);
-            return value;
+            return cachedValue;
         }
 
-        return cache.get(key);
+        final V value = valueSupplier.get();
+        put(key, value);
+        return value;
     }
 
     public Optional<V> getIfPresent(final K key) {
