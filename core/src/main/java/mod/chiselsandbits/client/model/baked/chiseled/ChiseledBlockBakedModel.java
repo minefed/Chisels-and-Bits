@@ -9,6 +9,8 @@ import mod.chiselsandbits.api.profiling.IProfilerSection;
 import mod.chiselsandbits.block.entities.ChiseledBlockEntity;
 import mod.chiselsandbits.blockinformation.BlockInformation;
 import mod.chiselsandbits.client.model.baked.base.BaseBakedBlockModel;
+import mod.chiselsandbits.client.model.baked.cache.BakedModelCacheWeight;
+import mod.chiselsandbits.client.model.baked.cache.EstimatedBakedModel;
 import mod.chiselsandbits.client.model.meshing.DirtyRegion;
 import mod.chiselsandbits.client.model.meshing.GreedyMeshBuilder;
 import mod.chiselsandbits.client.model.meshing.GreedyMeshFace;
@@ -31,7 +33,7 @@ import org.joml.Vector3f;
 
 import java.util.*;
 
-public class ChiseledBlockBakedModel extends BaseBakedBlockModel {
+public class ChiseledBlockBakedModel extends BaseBakedBlockModel implements EstimatedBakedModel {
 
     public static final ChiseledBlockBakedModel EMPTY = new ChiseledBlockBakedModel(
             BlockInformation.AIR,
@@ -131,6 +133,15 @@ public class ChiseledBlockBakedModel extends BaseBakedBlockModel {
         }
 
         return trulyEmpty;
+    }
+
+    @Override
+    public long getEstimatedCacheBytes() {
+        long bytes = 128;
+        for (final BakedQuad[] quads : new BakedQuad[][]{up, down, north, south, east, west, generic}) {
+            bytes = BakedModelCacheWeight.add(bytes, BakedModelCacheWeight.quadArray(quads));
+        }
+        return bytes;
     }
 
     private void generateFaces(

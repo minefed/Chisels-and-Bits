@@ -1,6 +1,8 @@
 package mod.chiselsandbits.client.model.baked.simple;
 
 import mod.chiselsandbits.client.model.baked.base.BaseBakedBlockModel;
+import mod.chiselsandbits.client.model.baked.cache.BakedModelCacheWeight;
+import mod.chiselsandbits.client.model.baked.cache.EstimatedBakedModel;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.MissingTextureAtlasSprite;
@@ -18,7 +20,7 @@ import java.util.Arrays;
 import java.util.List;
 
 @SuppressWarnings("deprecation")
-public class CombinedModel extends BaseBakedBlockModel
+public class CombinedModel extends BaseBakedBlockModel implements EstimatedBakedModel
 {
 
     private static final RandomSource COMBINED_RANDOM_MODEL = RandomSource.create(42);
@@ -86,5 +88,22 @@ public class CombinedModel extends BaseBakedBlockModel
     public boolean usesBlockLight()
     {
         return isSideLit;
+    }
+
+    @Override
+    public long getEstimatedCacheBytes()
+    {
+        long bytes = BakedModelCacheWeight.add(128, BakedModelCacheWeight.referenceArray(merged.length));
+        bytes = BakedModelCacheWeight.add(bytes, BakedModelCacheWeight.referenceArray(face.length));
+        bytes = BakedModelCacheWeight.add(bytes, BakedModelCacheWeight.quadListStorage(generic.size()));
+        for (final List<BakedQuad> quads : face)
+        {
+            bytes = BakedModelCacheWeight.add(bytes, BakedModelCacheWeight.quadListStorage(quads.size()));
+        }
+        for (final BakedModel model : merged)
+        {
+            bytes = BakedModelCacheWeight.add(bytes, BakedModelCacheWeight.model(model));
+        }
+        return bytes;
     }
 }

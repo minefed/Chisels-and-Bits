@@ -6,12 +6,13 @@ import mod.chiselsandbits.api.item.multistate.IMultiStateItem;
 import mod.chiselsandbits.api.item.multistate.IMultiStateItemStack;
 import mod.chiselsandbits.api.profiling.IProfilerSection;
 import mod.chiselsandbits.client.model.baked.base.BaseSmartModel;
+import mod.chiselsandbits.client.model.baked.cache.BakedModelCacheWeight;
 import mod.chiselsandbits.client.model.baked.simple.CombinedModel;
 import mod.chiselsandbits.client.model.baked.simple.NullBakedModel;
 import mod.chiselsandbits.client.util.BlockInformationUtils;
 import mod.chiselsandbits.profiling.ProfilingManager;
 import mod.chiselsandbits.registrars.ModModelProperties;
-import mod.chiselsandbits.utils.SimpleMaxSizedCache;
+import mod.chiselsandbits.utils.SimpleMaxWeightedCache;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.nbt.CompoundTag;
@@ -23,14 +24,25 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Collection;
+import java.util.function.LongSupplier;
 import java.util.stream.Stream;
 
 @SuppressWarnings("ConstantConditions")
 public class DataAwareChiseledBlockBakedModel extends BaseSmartModel
 {
-    private static final SimpleMaxSizedCache<CompoundTag, BakedModel> STACK_MODEL_CACHE = new SimpleMaxSizedCache<>(
-      IClientConfiguration.getInstance().getStackModelCacheSize()::get
+    private static final SimpleMaxWeightedCache<CompoundTag, BakedModel> STACK_MODEL_CACHE = createStackModelCache(
+      () -> IClientConfiguration.getInstance().getStackModelCacheSize().get(),
+      () -> IClientConfiguration.getInstance().getStackModelCacheMemoryBudget().get()
     );
+
+    static SimpleMaxWeightedCache<CompoundTag, BakedModel> createStackModelCache(final LongSupplier count, final LongSupplier bytes) {
+        // Long.MAX_VALUE is reserved for unmeasurable/overflowed model estimates, which always bypass retention.
+        return new SimpleMaxWeightedCache<>(count, () -> Math.min(Long.MAX_VALUE - 1, bytes.getAsLong()), BakedModelCacheWeight::estimate);
+    }
+
+    public static void clearCache() {
+        STACK_MODEL_CACHE.clear();
+    }
 
     @Override
     public boolean useAmbientOcclusion()

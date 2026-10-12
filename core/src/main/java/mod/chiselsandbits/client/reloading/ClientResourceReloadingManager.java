@@ -5,6 +5,7 @@ import mod.chiselsandbits.api.reloading.ICacheClearingHandler;
 import mod.chiselsandbits.client.besr.BitStorageBESR;
 import mod.chiselsandbits.client.model.baked.bit.BitBlockBakedModelManager;
 import mod.chiselsandbits.client.model.baked.chiseled.ChiseledBlockBakedModelManager;
+import mod.chiselsandbits.client.model.baked.chiseled.DataAwareChiseledBlockBakedModel;
 import mod.chiselsandbits.client.model.baked.face.FaceManager;
 import mod.chiselsandbits.reloading.DataReloadingResourceManager;
 import net.minecraft.client.Minecraft;
@@ -55,6 +56,7 @@ public class ClientResourceReloadingManager implements ResourceManagerReloadList
           .registerCacheClearer(BitStorageBESR::clearCache)
           .registerCacheClearer(BitBlockBakedModelManager.getInstance()::clearCache)
           .registerCacheClearer(ChiseledBlockBakedModelManager.getInstance()::clearCache)
+          .registerCacheClearer(DataAwareChiseledBlockBakedModel::clearCache)
           .registerCacheClearer(FaceManager.getInstance()::clearCache);
     }
 

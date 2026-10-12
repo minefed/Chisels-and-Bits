@@ -286,6 +286,15 @@ public interface IClientConfiguration
     Supplier<Long> getStackModelCacheSize();
 
     /**
+     * Estimated retained CPU memory budget for item model/NBT cache entries, in bytes.
+     * This is not an exact heap or GPU/VRAM measurement. Zero disables item model retention.
+     * The default method preserves compatibility with external configuration implementations.
+     */
+    default Supplier<Long> getStackModelCacheMemoryBudget() {
+        return () -> 64L * 1024 * 1024;
+    }
+
+    /**
      * Indicates the size of the cull testing cache.
      *
      * @return The size of the cull testing cache.

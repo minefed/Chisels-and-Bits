@@ -35,6 +35,7 @@ public class ClientConfiguration implements IClientConfiguration
     private final Supplier<Boolean>                    radialMenuMouseIndicator;
     private final Supplier<Long>                       modelCacheSize;
     private final Supplier<Long>                       stackModelCacheSize;
+    private final Supplier<Long>                       stackModelCacheMemoryBudget;
     private final Supplier<Long>                       faceLayerCacheSize;
     private final Supplier<Integer>                    modelBuildingThreadCount;
     private final Supplier<ChiseledRenderingPerformanceMode> chiseledRenderingPerformanceMode;
@@ -79,6 +80,7 @@ public class ClientConfiguration implements IClientConfiguration
           .availableProcessors());
         chiseledRenderingPerformanceMode = builder.defineEnum("performance.chiseled-rendering.mode", ChiseledRenderingPerformanceMode.BALANCED);
         stackModelCacheSize = builder.defineLong("performance.caches.sizes.stack-models", 100, 0, Long.MAX_VALUE);
+        stackModelCacheMemoryBudget = builder.defineLong("performance.caches.memory.stack-models-estimated-bytes", 64L * 1024 * 1024, 0, Long.MAX_VALUE - 1);
         showCoolDownError = builder.defineBoolean("settings.warnings.show-cool-down-error", false);
         shouldScrollInteractionsChangeMode = builder.defineBoolean("settings.interactions.scrolling-changes-mode", true);
 
@@ -226,6 +228,12 @@ public class ClientConfiguration implements IClientConfiguration
     public Supplier<Long> getStackModelCacheSize()
     {
         return stackModelCacheSize;
+    }
+
+    @Override
+    public Supplier<Long> getStackModelCacheMemoryBudget()
+    {
+        return stackModelCacheMemoryBudget;
     }
 
     @Override

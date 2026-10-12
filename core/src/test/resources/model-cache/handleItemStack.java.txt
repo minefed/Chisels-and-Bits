@@ -1,0 +1,31 @@
+    public BakedModel handleItemStack(ItemStack stack) {
+        final Item item = stack.getItem();
+        if (!(item instanceof final IMultiStateItem multiStateItem))
+            return NullBakedModel.instance;
+
+        final CompoundTag cacheKey = stack.save(new CompoundTag());
+        return STACK_MODEL_CACHE.get(cacheKey, () -> {
+            final IMultiStateItemStack multiStateItemStack = multiStateItem.createItemStack(stack);
+
+            final BakedModel[] typedModels;
+            try(IProfilerSection ignored1 = ProfilingManager.getInstance().withSection("Building individual render type models"))
+            {
+                typedModels = BlockInformationUtils.extractRenderTypes(multiStateItemStack.getStatistics().getContainedStates())
+                        .stream()
+                        .flatMap(type -> {
+                            final BakedModel fluidModel = ChiseledBlockBakedModelManager.getInstance().get(multiStateItemStack, ChiselRenderType.fromLayer(type, true), type);
+                            final BakedModel solidModel = ChiseledBlockBakedModelManager.getInstance().get(multiStateItemStack, ChiselRenderType.fromLayer(type, false), type);
+                            return Stream.of(fluidModel, solidModel);
+                        })
+                        .toArray(BakedModel[]::new);
+            }
+
+            if (typedModels.length == 0)
+                return ChiseledBlockBakedModel.EMPTY;
+
+            try(IProfilerSection ignored1 = ProfilingManager.getInstance().withSection("Combining model data"))
+            {
+                return new CombinedModel(typedModels);
+            }
+        });
+    }
