@@ -1,9 +1,12 @@
 package mod.chiselsandbits.utils;
 
-import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.PriorityQueue;
 import java.util.function.LongUnaryOperator;
 
 /**
@@ -17,10 +20,16 @@ public final class ModelDataUpdateCoalescer {
     private final Object stateLock = new Object();
     private final int maxQueuedUpdates;
 
-    private final ArrayDeque<Long> pendingQueue = new ArrayDeque<>();
-    private final Set<Long> pendingSet = new HashSet<>();
+    // Insertion order is the tie breaker, including when an in-flight request becomes a rerun.
+    private final Map<Long, Long> pending = new LinkedHashMap<>();
     private final Set<Long> inFlightSet = new HashSet<>();
     private final Set<Long> rerunSet = new HashSet<>();
+    private final Set<Long> dirtyPriorities = new HashSet<>();
+    private final Map<Long, RankedUpdate> ranksByKey = new HashMap<>();
+    private PriorityQueue<RankedUpdate> ranked = new PriorityQueue<>();
+    private long nextOrder;
+    private long rankedEpoch;
+    private boolean ranksValid;
 
     private long dedupedPendingCount;
     private long dedupedInFlightCount;
@@ -46,31 +55,33 @@ public final class ModelDataUpdateCoalescer {
                 return RequestResult.DEDUPED_IN_FLIGHT;
             }
 
-            if (pendingSet.contains(positionKey)) {
+            if (pending.containsKey(positionKey)) {
+                dirtyPriorities.add(positionKey);
                 dedupedPendingCount++;
                 return RequestResult.DEDUPED_PENDING;
             }
 
-            if (pendingQueue.size() >= maxQueuedUpdates) {
+            if (pending.size() >= maxQueuedUpdates) {
                 droppedQueueFullCount++;
                 return RequestResult.DROPPED_QUEUE_FULL;
             }
 
-            pendingQueue.addLast(positionKey);
-            pendingSet.add(positionKey);
+            enqueue(positionKey);
             return RequestResult.ENQUEUED;
         }
     }
 
     public OptionalLong pollNext(final LongUnaryOperator priorityScorer) {
         synchronized (stateLock) {
-            if (pendingQueue.isEmpty()) {
+            // This API deliberately keeps its fully dynamic scorer contract.
+            invalidateRanks();
+            if (pending.isEmpty()) {
                 return OptionalLong.empty();
             }
 
             Long selectedKey = null;
             long selectedScore = Long.MIN_VALUE;
-            for (Long candidate : pendingQueue) {
+            for (Long candidate : pending.keySet()) {
                 final long score = priorityScorer.applyAsLong(candidate);
                 if (selectedKey == null || score > selectedScore) {
                     selectedKey = candidate;
@@ -82,10 +93,88 @@ public final class ModelDataUpdateCoalescer {
                 return OptionalLong.empty();
             }
 
-            pendingQueue.remove(selectedKey);
-            pendingSet.remove(selectedKey);
-            inFlightSet.add(selectedKey);
-            return OptionalLong.of(selectedKey);
+            return start(selectedKey);
+        }
+    }
+
+    /**
+     * Reuses rankings within an explicitly stable priority epoch (for example one client tick).
+     * New or coalesced requests and reruns are rescored even inside that epoch. Changing camera,
+     * age or other global scoring inputs requires a new epoch. Equal scores keep FIFO order.
+     */
+    public OptionalLong pollNext(final long priorityEpoch, final LongUnaryOperator priorityScorer) {
+        synchronized (stateLock) {
+            if (pending.isEmpty()) return OptionalLong.empty();
+            if (!ranksValid || rankedEpoch != priorityEpoch) {
+                invalidateRanks();
+                for (final var entry : pending.entrySet()) {
+                    ranksByKey.put(entry.getKey(), new RankedUpdate(entry.getKey(),
+                            priorityScorer.applyAsLong(entry.getKey()), entry.getValue()));
+                }
+                // The collection constructor heapifies in linear time on each new tick.
+                ranked = new PriorityQueue<>(ranksByKey.values());
+                rankedEpoch = priorityEpoch;
+                ranksValid = true;
+            }
+            // Compute before removing the dirty marker: a throwing scorer can safely be retried.
+            final var dirtyIterator = dirtyPriorities.iterator();
+            while (dirtyIterator.hasNext()) {
+                final long key = dirtyIterator.next();
+                final Long order = pending.get(key);
+                if (order != null) {
+                    final RankedUpdate update = new RankedUpdate(key, priorityScorer.applyAsLong(key), order);
+                    ranksByKey.put(key, update);
+                    ranked.add(update);
+                }
+                dirtyIterator.remove();
+            }
+            // Superseded ranks are lazy-invalidated. Bound that metadata under repeated promotions.
+            if (ranked.size() > Math.max(16, pending.size()) * 2) {
+                ranked = new PriorityQueue<>(ranksByKey.values());
+            }
+            RankedUpdate selected;
+            do {
+                selected = ranked.remove();
+            } while (ranksByKey.get(selected.key()) != selected);
+            return start(selected.key());
+        }
+    }
+
+    private void enqueue(final long key) {
+        pending.put(key, nextOrder++);
+        dirtyPriorities.add(key);
+    }
+
+    private OptionalLong start(final long key) {
+        pending.remove(key);
+        dirtyPriorities.remove(key);
+        ranksByKey.remove(key);
+        inFlightSet.add(key);
+        return OptionalLong.of(key);
+    }
+
+    private void invalidateRanks() {
+        ranksValid = false;
+        ranked.clear();
+        ranksByKey.clear();
+        dirtyPriorities.clear();
+    }
+
+    /** Forget a retired world's queue. Late completions must be filtered by the caller's world/entry identity. */
+    public void clear() {
+        synchronized (stateLock) {
+            pending.clear();
+            inFlightSet.clear();
+            rerunSet.clear();
+            invalidateRanks();
+        }
+    }
+
+    private record RankedUpdate(long key, long score, long order) implements Comparable<RankedUpdate> {
+        @Override
+        public int compareTo(final RankedUpdate other) {
+            final int byScore = Long.compare(other.score, score);
+            return byScore == 0 ? Long.compare(order, other.order) : byScore;
         }
     }
 
@@ -101,30 +190,29 @@ public final class ModelDataUpdateCoalescer {
                 return false;
             }
 
-            if (pendingSet.contains(positionKey)) {
+            if (pending.containsKey(positionKey)) {
                 return true;
             }
 
-            if (pendingQueue.size() >= maxQueuedUpdates) {
+            if (pending.size() >= maxQueuedUpdates) {
                 droppedQueueFullCount++;
                 return false;
             }
 
-            pendingQueue.addLast(positionKey);
-            pendingSet.add(positionKey);
+            enqueue(positionKey);
             return true;
         }
     }
 
     public boolean hasPending() {
         synchronized (stateLock) {
-            return !pendingQueue.isEmpty();
+            return !pending.isEmpty();
         }
     }
 
     public int getQueuedCount() {
         synchronized (stateLock) {
-            return pendingQueue.size();
+            return pending.size();
         }
     }
 
@@ -137,7 +225,7 @@ public final class ModelDataUpdateCoalescer {
     public Snapshot snapshot() {
         synchronized (stateLock) {
             return new Snapshot(
-                    pendingQueue.size(),
+                    pending.size(),
                     inFlightSet.size(),
                     dedupedPendingCount,
                     dedupedInFlightCount,

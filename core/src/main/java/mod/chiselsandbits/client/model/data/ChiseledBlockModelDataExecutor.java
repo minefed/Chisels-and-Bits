@@ -26,6 +26,7 @@ import mod.chiselsandbits.client.model.baked.simple.NullBakedModel;
 import mod.chiselsandbits.client.model.meshing.IncrementalGreedyMeshBuilder;
 import mod.chiselsandbits.client.multistate.rendering.RenderingAreaAccessor;
 import mod.chiselsandbits.client.util.BlockInformationUtils;
+import mod.chiselsandbits.client.time.TickHandler;
 import mod.chiselsandbits.profiling.ProfilingManager;
 import mod.chiselsandbits.registrars.ModModelProperties;
 import mod.chiselsandbits.utils.ModelDataUpdateCoalescer;
@@ -36,10 +37,12 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 
 import java.util.*;
+import java.lang.ref.WeakReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -78,6 +81,8 @@ public class ChiseledBlockModelDataExecutor {
     private static final AtomicLong DROPPED_REQUEST_COUNT = new AtomicLong();
     private static volatile IClientConfiguration.ChiseledRenderingPerformanceMode ACTIVE_PERFORMANCE_MODE;
     private static volatile int ACTIVE_THREAD_COUNT = -1;
+    private static long priorityEpoch = Long.MIN_VALUE;
+    private static PriorityContext priorityContext;
 
     public static void updateModelDataCore(final ChiseledBlockEntity tileEntity, final Runnable onCompleteCallback) {
         scheduleModelDataUpdate(tileEntity, onCompleteCallback, UpdatePriority.STANDARD);
@@ -203,9 +208,18 @@ public class ChiseledBlockModelDataExecutor {
     }
 
     private static void drainScheduledModelUpdates() {
+        final long epoch = TickHandler.getClientTicks();
+        if (priorityContext == null || priorityEpoch != epoch) {
+            priorityEpoch = epoch;
+            final Minecraft minecraft = Minecraft.getInstance();
+            final Entity camera = minecraft == null ? null : minecraft.getCameraEntity();
+            priorityContext = new PriorityContext(System.nanoTime(), camera == null ? null : camera.position(),
+                    camera == null ? null : camera.getLookAngle().normalize(), new WeakReference<>(minecraft == null ? null : minecraft.level));
+        }
+        final PriorityContext context = priorityContext;
         int submitted = 0;
         while (submitted < MAX_DRAIN_SUBMISSIONS_PER_PUMP && hasAvailableSchedulingCapacity()) {
-            final OptionalLong nextPosition = MODEL_UPDATE_COALESCER.pollNext(ChiseledBlockModelDataExecutor::scorePendingUpdate);
+            final OptionalLong nextPosition = MODEL_UPDATE_COALESCER.pollNext(epoch, key -> scorePendingUpdate(key, context));
             if (nextPosition.isEmpty()) {
                 break;
             }
@@ -231,30 +245,23 @@ public class ChiseledBlockModelDataExecutor {
         return Math.max(32, IClientConfiguration.getInstance().getModelUpdateQueueBudget());
     }
 
-    private static long scorePendingUpdate(final long positionKey) {
+    private static long scorePendingUpdate(final long positionKey, final PriorityContext context) {
         final ScheduledUpdateEntry entry = SCHEDULED_UPDATES.get(positionKey);
         if (entry == null) {
             return Long.MIN_VALUE;
         }
 
         long score = entry.getPriority().baseScore();
-        score += Math.min(entry.waitMillis(), 5_000L) * 1_000L;
-
-        final Minecraft minecraft = Minecraft.getInstance();
-        if (minecraft == null) {
-            return score;
-        }
-
-        final Entity cameraEntity = minecraft.getCameraEntity();
-        if (cameraEntity == null) {
+        score += Math.min(entry.waitMillis(context.timeNanos()), 5_000L) * 1_000L;
+        if (context.cameraPosition() == null) {
             return score;
         }
 
         final ChiseledBlockEntity tileEntity = entry.getTileEntity();
         final double distanceSq = tileEntity.getBlockPos().distToCenterSqr(
-                cameraEntity.getX(),
-                cameraEntity.getY(),
-                cameraEntity.getZ()
+                context.cameraPosition().x,
+                context.cameraPosition().y,
+                context.cameraPosition().z
         );
 
         final long distanceScore = Math.max(0L, 1_500_000L - (long) (distanceSq * CAMERA_DISTANCE_WEIGHT));
@@ -264,20 +271,23 @@ public class ChiseledBlockModelDataExecutor {
             score += CAMERA_NEAR_BONUS;
         }
 
-        final Vec3 toTarget = Vec3.atCenterOf(tileEntity.getBlockPos()).subtract(cameraEntity.position());
+        final Vec3 toTarget = Vec3.atCenterOf(tileEntity.getBlockPos()).subtract(context.cameraPosition());
         if (toTarget.lengthSqr() > 1.0E-6D) {
-            final double facingDot = cameraEntity.getLookAngle().normalize().dot(toTarget.normalize());
+            final double facingDot = context.cameraLook().dot(toTarget.normalize());
             if (facingDot > CAMERA_FRONT_FACING_THRESHOLD) {
                 score += (long) ((facingDot - CAMERA_FRONT_FACING_THRESHOLD) * CAMERA_FRONT_FACING_WEIGHT);
             }
         }
 
-        if (minecraft.level == tileEntity.getLevel() && minecraft.level != null && minecraft.level.isLoaded(tileEntity.getBlockPos())) {
+        final Level world = context.world().get();
+        if (world == tileEntity.getLevel() && world != null && world.isLoaded(tileEntity.getBlockPos())) {
             score += LOADED_CHUNK_BONUS;
         }
 
         return score;
     }
+
+    private record PriorityContext(long timeNanos, Vec3 cameraPosition, Vec3 cameraLook, WeakReference<Level> world) {}
 
     private static void maybeLogSchedulerMetrics() {
         final long total = TOTAL_REQUEST_COUNT.get();
@@ -534,8 +544,8 @@ public class ChiseledBlockModelDataExecutor {
             return priority;
         }
 
-        private long waitMillis() {
-            final long elapsedNanos = Math.max(0L, System.nanoTime() - firstEnqueuedNanos);
+        private long waitMillis(final long nowNanos) {
+            final long elapsedNanos = Math.max(0L, nowNanos - firstEnqueuedNanos);
             return TimeUnit.NANOSECONDS.toMillis(elapsedNanos);
         }
 

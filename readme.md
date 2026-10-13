@@ -25,3 +25,21 @@ If a mod maker wants to control the selection procedure for his or her blocks, h
 ### Cross Platform Compatibility:
 This project now targets Fabric only.
 Common code is still shared through the `core` subproject and loaded by the Fabric module.
+
+### Minefed model update scheduling
+The Minecraft 1.20.4 Fabric fork tracks `minefed-1.20.4`. Model update priorities
+reuse a camera and age snapshot within each client tick; a new tick recalculates
+the pending ranks. New requests, priority promotions and reruns still refresh
+their own ranks immediately. Equal priorities preserve queue order. The dynamic
+`pollNext(scorer)` API continues to evaluate every pending entry on every call.
+This changes scheduling work, without changing model geometry or image quality.
+
+The coalescer regression test drains 2,048 entries in one stable epoch with 2,048
+score evaluations, compared with 2,098,176 for repeated full scans. This is a
+kernel work count, not an FPS or loading-time estimate: real execution submits
+at most eight jobs per pump and refreshes remaining priorities each client tick.
+With one, four or eight polls per epoch, the same queue requires 2,098,176,
+525,312 or 263,168 score evaluations respectively. One poll per epoch saves no
+score evaluations and still incurs heap maintenance; multiple pumps may run in
+one client tick. Heap construction is linear in the remaining queue size.
+Queue limits and full-queue behavior are unchanged by this optimization.
